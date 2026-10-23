@@ -43,12 +43,34 @@ VoiceFem использует PSOLA — высота и форманты упр�
 Помимо DSP/PSOLA-движка плагин содержит **нейросетевую конвертацию голоса** (как в Supertone Shift): контент-энкодер (класс ContentVec) → конверсия F0 → RVC-генератор. Голос пересинтезируется тембром выбранной модели — полная смена тембра, а не сдвиг формант. Латентность ~60 мс (стриминговые чанки 40 мс + перекрёстный кроссфейд 20 мс).
 
 ### Установка моделей
-1. Создайте папку `%APPDATA%\VoiceFem\models`
-2. Положите туда:
-   - `content.onnx` — контент-энкодер (ContentVec/HuBERT в ONNX, 16 кГц);
-   - `voice_<имя>.onnx` — один или несколько RVC-генераторов (ONNX-экспорт в стиле w-okada/RVC: входы phone/phone_lengths/pitch/pitchf, выход — аудио 32–48 кГц).
-3. Проверьте совместимость: `python tools/validate_model.py "%APPDATA%\VoiceFem\models"`
-4. В плагине: Engine = **Neural (model)**, выберите голос в списке Neural Voice.
+Модели кладутся в `%APPDATA%\VoiceFem\models` (кнопка **Models...** в интерфейсе открывает эту папку). Нужны два типа файлов:
+
+- `content.onnx` — контент-энкодер ContentVec-768 (общий для всех голосов);
+- `voice_<имя>.onnx` — один или несколько RVC-генераторов.
+
+**Способ 1 — готовый скрипт (проще всего):**
+```
+powershell -ExecutionPolicy Bypass -File tools\install_models.ps1
+```
+Скачает ContentVec-энкодер и два готовых женских голоса (~870 МБ, HuggingFace).
+
+**Способ 2 — артефакт CI:** Actions → прогон → артефакт `VoiceFem-models` → распаковать в `%APPDATA%\VoiceFem\models`.
+
+**Способ 3 — свои голоса из RVC-чекпойнтов (.pth):**
+```
+pip install torch onnx onnxruntime scipy
+# Windows/CPU torch:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+python tools\pth_to_onnx.py Модель.pth voice_имя.onnx
+copy voice_имя.onnx "%APPDATA%\VoiceFem\models\"
+```
+Поддерживаются RVC v1 (256) и v2 (768), с F0 и без. Конвертер повторяет официальный экспорт RVC (`SynthesizerTrnMsNSFsidM`) и автоматически выбирает нужный режим кадров. Также подходят готовые ONNX-экспорты в конвенции w-okada / VC Client (phone/phone_lengths/pitch/pitchf/ds[/rnd]).
+
+Проверка совместимости: `python tools/validate_model.py "%APPDATA%\VoiceFem\models"`
+
+В плагине: Engine = **Neural (model)**, выберите голос в списке Neural Voice. Пока модели не найдены/грузятся, звучит DSP-движок, а строка статуса показывает, что происходит:
+- `no models in <путь>` — папка пуста (путь указан точно; файлы можно докладывать на ходу, движок подхватит через ~2 с);
+- `content.onnx: ...` / `voice model: ...` — модель не загрузилась, причина от ONNX Runtime;
+- `ready: <голос>` — нейро-режим активен.
 
 Модели RVC берите только **со своего голоса / с согласия владельца** — плагин для личного использования.
 

@@ -19,7 +19,9 @@ VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p
     voiceLabel.setText ("Neural Voice", juce::dontSendNotification);
     voiceLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (voiceLabel);
-    voiceBox.addItem ("(no models in %APPDATA%\\VoiceFem\\models)", 1);
+    voiceBox.addItem (proc.neuralBuilt()
+                          ? "(no models in %APPDATA%\\VoiceFem\\models)"
+                          : "(neural not included in this build)", 1);
     voiceBox.setEnabled (false);
     voiceBox.onChange = [this]
     {
@@ -28,10 +30,22 @@ VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p
     };
     addAndMakeVisible (voiceBox);
 
-    statusLabel.setText ("", juce::dontSendNotification);
+    statusLabel.setText (proc.neuralBuilt() ? "loading..." : "DSP-only build: neural engine not included",
+                         juce::dontSendNotification);
     statusLabel.setJustificationType (juce::Justification::centredRight);
     statusLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9d94ab));
+    statusLabel.setFont (juce::Font (juce::FontOptions (12.0f)));
     addAndMakeVisible (statusLabel);
+
+    modelsBtn.setButtonText ("Models...");
+    modelsBtn.setTooltip ("Open the neural model folder (%APPDATA%\\VoiceFem\\models)");
+    modelsBtn.onClick = [this]
+    {
+        auto dir = VoiceFemProcessor::modelsDir();
+        if (! dir.isDirectory()) dir.createDirectory();
+        dir.revealToUser();
+    };
+    addAndMakeVisible (modelsBtn);
 
     addKnob ("pitch", "Pitch");
     addKnob ("formant", "Formant");
@@ -104,7 +118,9 @@ void VoiceFemEditor::paint (juce::Graphics& g)
     g.drawText ("VoiceFem", 16, 10, 200, 30, juce::Justification::centredLeft);
     g.setColour (juce::Colour (0xff6b6478));
     g.setFont (juce::FontOptions (13.0f));
-    g.drawText ("realtime feminine voice engine v2", 220, 16, 300, 20, juce::Justification::centredLeft);
+    g.drawText (juce::String ("v") + proc.kVersionString + (proc.neuralBuilt() ? "  -  neural engine"
+                                                                              : "  -  DSP-only build"),
+                220, 16, 300, 20, juce::Justification::centredLeft);
 }
 
 void VoiceFemEditor::resized()
@@ -127,9 +143,10 @@ void VoiceFemEditor::resized()
 
     area.removeFromTop (6);
     auto voiceRow = area.removeFromTop (30);
-    statusLabel.setBounds (voiceRow.removeFromRight (200));
-    voiceLabel.setBounds (voiceRow.removeFromLeft (86));
-    voiceBox.setBounds (voiceRow.reduced (4, 0).removeFromLeft (200));
+    statusLabel.setBounds (voiceRow.removeFromRight (voiceRow.getWidth() - 70 - 190 - 66 - 12));
+    modelsBtn.setBounds (voiceRow.removeFromRight (66).reduced (2, 2));
+    voiceBox.setBounds (voiceRow.removeFromRight (190));
+    voiceLabel.setBounds (voiceRow.removeFromRight (70));
 
     area.removeFromTop (6);
     const int cols = 4, rows = 3;

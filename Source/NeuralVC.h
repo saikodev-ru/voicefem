@@ -218,9 +218,14 @@ static void fillModelIO (Ort::Session& s, ModelIO& io)
     }
 }
 
-static std::unique_ptr<SessionHolder> openSession (const std::string& path, int threads)
+static std::unique_ptr<SessionHolder> openSession (const std::string& path, int threads,
+                                                   std::string* err = nullptr)
 {
-    if (! readFileOk (path)) return nullptr;
+    if (! readFileOk (path))
+    {
+        if (err) *err = "file missing or unreadable";
+        return nullptr;
+    }
     auto h = std::make_unique<SessionHolder>();
     h->env = std::make_unique<Ort::Env> (ORT_LOGGING_LEVEL_WARNING, "voicefem-nn");
     Ort::SessionOptions so;
@@ -229,7 +234,8 @@ static std::unique_ptr<SessionHolder> openSession (const std::string& path, int 
     so.SetIntraOpNumThreads (std::max (1, threads));
     so.SetInterOpNumThreads (1);
     try { h->ses = std::make_unique<Ort::Session> (*h->env, nativePath (path).c_str(), so); }
-    catch (...) { return nullptr; }
+    catch (const Ort::Exception& e) { if (err) *err = e.what(); return nullptr; }
+    catch (...) { if (err) *err = "unknown error"; return nullptr; }
     fillModelIO (*h->ses, h->io);
     return h;
 }
@@ -269,93 +275,154 @@ public:
         return out;
     }
 
-    bool loadContent (const std::string& path, int threads)
+    bool loadContent (const std::string& path, int threads, std::string* err = nullptr)
     {
-        auto s = openSession (path, threads);
-        if (! s) return false;
+        std::string e;
+        auto s = openSession (path, threads, &e);
+        if (! s) { lastErr_ = e; if (err) *err = e; return false; }
         content_ = std::move (s);
+        lastErr_.clear();
         return true;
     }
+
+    const std::string& lastError() const { return lastErr_; }
 
     bool contentReady() const { return content_ != nullptr; }
 
     // returns model sample rate, or 0 on failure
-    double loadVoice (const std::string& path)
+    double loadVoice (const std::string& path, std::string* err = nullptr)
     {
-        auto s = openSession (path, threads_);
-        if (! s) return 0.0;
+        std::string e;
+        auto s = openSession (path, threads_, &e);
+        if (! s) { lastErr_ = e; if (err) *err = e; return 0.0; }
+        lastErr_.clear();
 
-        // probe: silent 3-frame inference reveals outSamplesPerFrame -> model SR
-        double sr = 48000.0;
-        try
+        // probe: silent inference reveals samples-per-input-frame -> model SR
+        // and frame semantics (RVC v2 generators consume 100 fps inputs:
+        // they emit modelSr/100 samples per 50 fps ContentVec frame).
+        auto runProbe = [&] (int Tp, double& spfOut) -> bool
         {
-            Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu (OrtArenaAllocator, OrtMemTypeDefault);
-            const int T = 3;
-            std::vector<float> feat ((size_t) T * kFeatDim, 0.f);
-            std::vector<float> pf ((size_t) T, 110.f);
-            std::vector<int64_t> pc ((size_t) T, coarseOf (110.f));
-            std::vector<int64_t> len { T };
-            std::vector<int64_t> dsv { 0 }, ds2 { 0, 0 };
-            std::vector<Ort::Value> feeds;
-            std::vector<const char*> names;
-            const std::array<int64_t, 1> dLen { 1 };
-            const std::array<int64_t, 1> dSpk1 { 1 };
-            const std::array<int64_t, 2> dSpk2 { 1, 1 };
-            for (size_t i = 0; i < s->io.inNames.size(); ++i)
+            try
             {
-                const std::string n = lower (s->io.inNames[i]);
-                const auto ty = s->io.inTypes[i];
-                if (n.find ("length") != std::string::npos && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+                Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu (OrtArenaAllocator, OrtMemTypeDefault);
+                std::vector<float> feat ((size_t) Tp * kFeatDim, 0.f);
+                std::vector<float> pf ((size_t) Tp, 110.f);
+                std::vector<int64_t> pc ((size_t) Tp, coarseOf (110.f));
+                std::vector<int64_t> len { Tp };
+                std::vector<int64_t> dsv { 0 }, ds2 { 0, 0 };
+                std::vector<Ort::Value> feeds;
+                std::vector<const char*> names;
+                std::vector<float> rndBuf;
+                const std::array<int64_t, 1> dLen { 1 };
+                const std::array<int64_t, 1> dSpk1 { 1 };
+                const std::array<int64_t, 2> dSpk2 { 1, 1 };
+                for (size_t i = 0; i < s->io.inNames.size(); ++i)
                 {
-                    names.push_back (s->io.inNames[i].c_str());
-                    feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, len.data(), 1, dLen.data(), 1));
+                    const std::string n = lower (s->io.inNames[i]);
+                    const auto ty = s->io.inTypes[i];
+                    if (n.find ("length") != std::string::npos && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+                    {
+                        names.push_back (s->io.inNames[i].c_str());
+                        feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, len.data(), 1, dLen.data(), 1));
+                    }
+                    else if (n.find ("pitch") != std::string::npos && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+                    {
+                        names.push_back (s->io.inNames[i].c_str());
+                        std::array<int64_t, 2> d { 1, Tp };
+                        feeds.push_back (Ort::Value::CreateTensor<float> (mi, pf.data(), pf.size(), d.data(), 2));
+                    }
+                    else if (n.find ("pitch") != std::string::npos && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+                    {
+                        names.push_back (s->io.inNames[i].c_str());
+                        std::array<int64_t, 2> d { 1, Tp };
+                        feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, pc.data(), pc.size(), d.data(), 2));
+                    }
+                    else if (ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+                             && (n.find ("rnd") != std::string::npos || n.find ("noise") != std::string::npos
+                                 || n.find ("rand") != std::string::npos))
+                    {
+                        // noise/seed input (w-okada style exports declare it REQUIRED):
+                        // zeros shaped from the declared dims, dynamic dims resolved to Tp
+                        names.push_back (s->io.inNames[i].c_str());
+                        std::vector<int64_t> dims;
+                        int64_t count = 1;
+                        for (size_t k = 0; k < s->io.inShapes[i].size(); ++k)
+                        {
+                            int64_t d = s->io.inShapes[i][k];
+                            if (d <= 0) d = (k + 1 == s->io.inShapes[i].size()) ? (int64_t) Tp : 1;
+                            dims.push_back (d);
+                            count *= d;
+                        }
+                        if (dims.empty()) { dims = { (int64_t) Tp }; count = Tp; }
+                        rndBuf.assign ((size_t) count, 0.f);
+                        feeds.push_back (Ort::Value::CreateTensor<float> (mi, rndBuf.data(), rndBuf.size(),
+                                                                          dims.data(), (int) dims.size()));
+                    }
+                    else if (ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT && s->io.inShapes[i].size() >= 2)
+                    {
+                        names.push_back (s->io.inNames[i].c_str());
+                        std::array<int64_t, 3> d { 1, Tp, kFeatDim };
+                        feeds.push_back (Ort::Value::CreateTensor<float> (mi, feat.data(), feat.size(), d.data(), 3));
+                    }
+                    else if (ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64
+                             && (n.find ("ds") != std::string::npos || n.find ("sid") != std::string::npos || n.find ("spk") != std::string::npos))
+                    {
+                        names.push_back (s->io.inNames[i].c_str());
+                        if (s->io.inShapes[i].size() >= 2)
+                            feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, ds2.data(), 2, dSpk2.data(), 2));
+                        else
+                            feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, dsv.data(), 1, dSpk1.data(), 1));
+                    }
                 }
-                else if (n.find ("pitch") != std::string::npos && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-                {
-                    names.push_back (s->io.inNames[i].c_str());
-                    std::array<int64_t, 2> d { 1, T };
-                    feeds.push_back (Ort::Value::CreateTensor<float> (mi, pf.data(), pf.size(), d.data(), 2));
-                }
-                else if (n.find ("pitch") != std::string::npos && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-                {
-                    names.push_back (s->io.inNames[i].c_str());
-                    std::array<int64_t, 2> d { 1, T };
-                    feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, pc.data(), pc.size(), d.data(), 2));
-                }
-                else if (ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT && s->io.inShapes[i].size() >= 2)
-                {
-                    names.push_back (s->io.inNames[i].c_str());
-                    std::array<int64_t, 3> d { 1, T, kFeatDim };
-                    feeds.push_back (Ort::Value::CreateTensor<float> (mi, feat.data(), feat.size(), d.data(), 3));
-                }
-                else if (ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64
-                         && (n.find ("ds") != std::string::npos || n.find ("sid") != std::string::npos || n.find ("spk") != std::string::npos))
-                {
-                    names.push_back (s->io.inNames[i].c_str());
-                    if (s->io.inShapes[i].size() >= 2)
-                        feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, ds2.data(), 2, dSpk2.data(), 2));
-                    else
-                        feeds.push_back (Ort::Value::CreateTensor<int64_t> (mi, dsv.data(), 1, dSpk1.data(), 1));
-                }
-            }
-            auto outs = s->ses->Run (Ort::RunOptions { nullptr }, names.data(), feeds.data(), feeds.size(),
-                                     s->io.outPtrs.data(), (size_t) std::min<size_t> (1, s->io.outPtrs.size()));
-            if (! outs.empty())
-            {
+                auto outs = s->ses->Run (Ort::RunOptions { nullptr }, names.data(), feeds.data(), feeds.size(),
+                                         s->io.outPtrs.data(), (size_t) std::min<size_t> (1, s->io.outPtrs.size()));
+                if (outs.empty()) return false;
                 const auto sh = outs[0].GetTensorTypeAndShapeInfo().GetShape();
                 int64_t M = 0;
                 for (auto d : sh) if (d > M) M = d;
-                if (M > 0) sr = (double) M * 50.0 / (double) T;
-                // snap to common model rates
-                for (double c : { 32000.0, 40000.0, 44100.0, 48000.0 })
-                    if (std::fabs (sr - c) < 200.0) { sr = c; break; }
+                if (M <= 0) return false;
+                spfOut = (double) M / (double) Tp;
+                return true;
+            }
+            catch (const Ort::Exception&) { return false; }
+        };
+        auto snapRate = [] (double x) -> double
+        {
+            for (double c : { 32000.0, 40000.0, 44100.0, 48000.0 })
+                if (std::fabs (x - c) < 200.0) return c;
+            return 0.0;
+        };
+
+        double spf = 0.0;
+        int probeT = 0;
+        if (runProbe (3, spf)) probeT = 3;
+        else if (runProbe (6, spf)) probeT = 6;
+        if (probeT == 0)
+        {
+            if (lastErr_.empty()) lastErr_ = "model probe failed";
+            return 0.0;
+        }
+
+        const double sr50 = snapRate (spf * 50.0);
+        const double sr100 = snapRate (spf * 100.0);
+        if (sr50 > 0.0)       { modelSr = sr50;    fps100_ = false; }
+        else if (sr100 > 0.0) { modelSr = sr100;   fps100_ = true;  }
+        else                  { modelSr = 48000.0; fps100_ = false; }
+
+        // streaming feeds exactly 6 frames in 100 fps mode, 3 otherwise;
+        // T-locked exports must accept their runtime shape
+        const int feedT = fps100_ ? 6 : 3;
+        if (feedT != probeT)
+        {
+            double tmp = 0.0;
+            if (! runProbe (feedT, tmp))
+            {
+                lastErr_ = "model does not accept the streaming frame count - re-export with tools/pth_to_onnx.py";
+                return 0.0;
             }
         }
-        catch (const Ort::Exception&) { sr = 48000.0; }
-
-        modelSr = sr;
         swapVoice (std::move (s));
-        return sr;
+        return modelSr;
     }
 
     void setModelSampleRate (double sr) { modelSr = sr; }
@@ -377,6 +444,7 @@ public:
     void prepare (double hostSampleRate)
     {
         hostSr = hostSampleRate;
+        rsIn.ratio = 16000.0 / hostSampleRate;   // host -> content encoder rate
         chunk16 = kCtxFrames * kHop16 + kChunkFrames * kHop16;    // 960
         consume16 = kChunkFrames * kHop16;                        // 640
         opfHost = (int) std::lround (hostSr / 50.0);              // audio samples per frame @host
@@ -393,8 +461,10 @@ public:
     {
         rsIn.reset(); rsOut.reset();
         acc16.clear(); f0.reset();
+        outAcc.clear();
         delay.assign (delayCap, 0.f);
         dWrite = (size_t) tailLen;   // virtual zero tail pre-written
+        readPos = (dWrite + delayCap * 8 - (size_t) L) % delayCap;
         tail.assign ((size_t) std::max (1, tailLen), 0.f);
         lastF0Hold = 0.f; medianLog = std::log (130.f);
         nIn = 0; nOut = 0;
@@ -420,16 +490,22 @@ public:
         }
         nIn++;
 
-        // run steps while enough 16k audio is buffered (keeps latency bounded)
-        while ((int) acc16.size() >= chunk16)
+        // run steps while enough 16k audio is buffered (keeps latency bounded).
+        // kHop16 of extra prefix guarantees the content encoder yields >= T frames
+        // (several exports lose up to one hop at the window head:
+        // frames = floor((N - L) / 320), L in (0, 320]).
+        while ((int) acc16.size() >= chunk16 + kHop16)
         {
-            if ((int) acc16.size() > 6 * chunk16) // CPU-starved: shed old audio, recover
-                acc16.erase (acc16.begin(), acc16.end() - 4 * chunk16);
+            if ((int) acc16.size() > 6 * (chunk16 + kHop16)) // CPU-starved: shed old audio
+                acc16.erase (acc16.begin(), acc16.end() - 4 * (chunk16 + kHop16));
             runStep();
         }
 
-        // read from delay line
-        const float y = delay[(dWrite + delayCap - (size_t) L) % delayCap];
+        // read from delay line: cursor sweeps one sample per call and sits
+        // L samples behind the write head (a fixed index would sample-and-hold
+        // the whole block - the ring is written in bursts per inference step)
+        const float y = delay[readPos % delayCap];
+        ++readPos;
         nOut++;
         return y;
     }
@@ -444,9 +520,9 @@ private:
 
         // ---- window (aligned with the absolute 16k timeline even if buffered)
         const int T = chunk16 / kHop16; // total frames in window (ctx + chunk)
-        const int64_t surplus = (int64_t) acc16.size() - chunk16;
+        const int64_t surplus = (int64_t) acc16.size() - (chunk16 + kHop16);
         const int64_t winEndAbs = f0.head - surplus;   // absolute 16k index of window end
-        std::vector<float> win (acc16.begin(), acc16.begin() + chunk16);
+        std::vector<float> win (acc16.begin(), acc16.begin() + (chunk16 + kHop16));
 
         // ---- content features
         try
@@ -482,7 +558,6 @@ private:
             else if (osh.size() == 2) { featT = osh[0]; featD = osh[1]; }
             if (featT < T || featD != kFeatDim) { acc16.erase (acc16.begin(), acc16.begin() + consume16); return; }
             const int64_t off = featT - T; // use the LAST T frames
-
             // ---- per-frame F0 on the 16k window (frames end at hop boundaries)
             std::vector<float> pitchf ((size_t) T, 0.f);
             const float f0thr = 0.42f;
@@ -518,12 +593,29 @@ private:
                 coarse[(size_t) t] = coarseOf (fo);
             }
 
+            // RVC v2 generators consume 100 fps inputs: duplicate the 50 fps
+            // frames (nearest upsampling) before feeding phone/pitch tensors
+            const int Tfeed = fps100_ ? 2 * T : T;
+            if (fps100_)
+            {
+                f0out.resize ((size_t) Tfeed);
+                coarse.resize ((size_t) Tfeed);
+                for (int t = T - 1; t >= 0; --t)
+                {
+                    f0out[(size_t) (2 * t + 1)] = f0out[(size_t) t];
+                    f0out[(size_t) (2 * t)] = f0out[(size_t) t];
+                    coarse[(size_t) (2 * t + 1)] = coarse[(size_t) t];
+                    coarse[(size_t) (2 * t)] = coarse[(size_t) t];
+                }
+            }
+
             // ---- generator inputs (adaptive binding)
             std::vector<Ort::Value> feeds;
             std::vector<const char*> feedNames;
-            std::vector<int64_t> lengths { T };
+            std::vector<int64_t> lengths { Tfeed };
             std::vector<int64_t> dsv { 0 };
             std::vector<int64_t> ds2 { 0, 0 };
+            std::vector<float> rndBuf;
             for (size_t i = 0; i < gen->io.inNames.size(); ++i)
             {
                 const std::string n = lower (gen->io.inNames[i]);
@@ -546,11 +638,44 @@ private:
                     feedNames.push_back (gen->io.inNames[i].c_str());
                     feeds.push_back (mk2D (mi, coarse, sh));
                 }
+                else if (ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+                         && (n.find ("rnd") != std::string::npos || n.find ("noise") != std::string::npos
+                             || n.find ("rand") != std::string::npos))
+                {
+                    // noise/seed input (w-okada style exports declare it REQUIRED):
+                    // zeros shaped from the declared dims, dynamic dims resolved to Tfeed
+                    feedNames.push_back (gen->io.inNames[i].c_str());
+                    std::vector<int64_t> dims;
+                    int64_t count = 1;
+                    for (size_t k = 0; k < sh.size(); ++k)
+                    {
+                        int64_t d = sh[k];
+                        if (d <= 0) d = (k + 1 == sh.size()) ? (int64_t) Tfeed : 1;
+                        dims.push_back (d);
+                        count *= d;
+                    }
+                    if (dims.empty()) { dims = { (int64_t) Tfeed }; count = Tfeed; }
+                    rndBuf.assign ((size_t) count, 0.f);
+                    feeds.push_back (Ort::Value::CreateTensor<float> (mi, rndBuf.data(), rndBuf.size(),
+                                                                      dims.data(), (int) dims.size()));
+                }
                 else if ((n.find ("phone") != std::string::npos || n.find ("hidden") != std::string::npos || n.find ("feat") != std::string::npos)
                          && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
                 {
                     // slice features to the last T frames, contiguous [T,768]
                     featBuf.assign (feat + off * kFeatDim, feat + (off + T) * kFeatDim);
+                    if (fps100_)
+                    {
+                        const size_t rows = (size_t) T * kFeatDim;
+                        featBuf.resize (rows * 2);
+                        for (int t = T - 1; t >= 0; --t)
+                        {
+                            std::copy_n (featBuf.data() + (size_t) t * kFeatDim, kFeatDim,
+                                         featBuf.data() + (size_t) (2 * t + 1) * kFeatDim);
+                            std::copy_n (featBuf.data() + (size_t) t * kFeatDim, kFeatDim,
+                                         featBuf.data() + (size_t) (2 * t) * kFeatDim);
+                        }
+                    }
                     feedNames.push_back (gen->io.inNames[i].c_str());
                     feeds.push_back (mkFeat (mi, featBuf, sh));
                 }
@@ -587,29 +712,39 @@ private:
             std::vector<float> emitted;
             rsOut.ratio = hostSr / modelSr;
             rsOut.push (au, (int) M, emitted);
+            outAcc.insert (outAcc.end(), emitted.begin(), emitted.end());
 
-            // ---- keep (chunkFrames+1) frames, crossfade head with previous tail
+            // ---- emit (chunkFrames+1) host frames per step, crossfading the head
+            // with the previous tail; outAcc decouples this from resampler rounding
             const int keep = (kChunkFrames + 1) * opfHost;
-            if ((int) emitted.size() >= keep)
+            while ((int) outAcc.size() >= keep)
             {
-                const int startOff = (int) emitted.size() - keep;
-                for (int i = 0; i < tailLen && startOff + i < (int) emitted.size(); ++i)
+                for (int i = 0; i < tailLen; ++i)
                 {
                     const float w = 0.5f - 0.5f * std::cos (kPiF * (float) i / (float) tailLen);
-                    emitted[(size_t) (startOff + i)] = tail[(size_t) i] * (1.f - w) + emitted[(size_t) (startOff + i)] * w;
+                    outAcc[(size_t) i] = tail[(size_t) i] * (1.f - w) + outAcc[(size_t) i] * w;
                 }
                 for (int i = 0; i < tailLen; ++i)
-                    tail[(size_t) i] = emitted[(size_t) (startOff + keep - tailLen + i)];
+                    tail[(size_t) i] = outAcc[(size_t) (keep - tailLen + i)];
 
                 // write into delay ring: head frame fuses with the previous tail
                 // slot (crossfade above), so rewind and keep the ring balanced
                 dWrite = dWrite >= (size_t) tailLen ? dWrite - (size_t) tailLen : dWrite;
                 for (int i = 0; i < keep; ++i)
                 {
-                    delay[dWrite % delayCap] = emitted[(size_t) (startOff + i)];
+                    delay[dWrite % delayCap] = outAcc[(size_t) i];
                     ++dWrite;
                 }
+                outAcc.erase (outAcc.begin(), outAcc.begin() + keep);
             }
+
+            // re-align the read cursor after CPU-starve bursts (several steps
+            // in one process() call advance dWrite faster than readPos)
+            const size_t expected = (dWrite + delayCap * 8 - (size_t) L) % delayCap;
+            long diff = (long) (readPos % delayCap) - (long) expected;
+            if (diff > (long) delayCap / 2) diff -= (long) delayCap;
+            if (diff < -(long) delayCap / 2) diff += (long) delayCap;
+            if (std::abs (diff) > 64) readPos = expected;
         }
         catch (const Ort::Exception&) { /* keep silent, pass zeros */ }
 
@@ -644,15 +779,18 @@ private:
     std::unique_ptr<SessionHolder> content_;
     std::atomic<SessionHolder*> gen_ { nullptr };
     std::atomic<bool> voiceLoaded_ { false };
+    std::string lastErr_;
     int threads_ = 2;
+    bool fps100_ = false;   // model consumes 100 fps inputs (2x upsampled features/f0)
 
     double hostSr = 48000.0, modelSr = 48000.0;
     int chunk16 = 960, consume16 = 640, opfHost = 960, tailLen = 960, L = 3840, latency = 2880;
     size_t delayCap = 7744;
 
     Resamp rsIn, rsOut;
-    std::vector<float> acc16, delay, tail;
+    std::vector<float> acc16, delay, tail, outAcc;
     size_t dWrite = 0;
+    size_t readPos = 0;
     F0Detector f0;
     float lastF0Hold = 0.f, medianLog = std::log (130.f);
     float semi = 4.f, tHz = 200.f, into = 1.f;
@@ -669,9 +807,12 @@ class NeuralEngine
 public:
     struct VoiceInfo { std::string name, path; };
     static std::vector<VoiceInfo> scanVoices (const std::string&) { return {}; }
-    bool loadContent (const std::string&, int) { return false; }
+    bool loadContent (const std::string&, int, std::string* err = nullptr)
+    { if (err) *err = "neural engine is not compiled into this build"; return false; }
     bool contentReady() const { return false; }
-    double loadVoice (const std::string&) { return 0.0; }
+    const std::string& lastError() const { static const std::string s; return s; }
+    double loadVoice (const std::string&, std::string* err = nullptr)
+    { if (err) *err = "neural engine is not compiled into this build"; return 0.0; }
     void setModelSampleRate (double) {}
     double getModelSampleRate() const { return 0; }
     void swapVoice (void*) {}

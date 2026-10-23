@@ -76,3 +76,32 @@ jobs:
           name: VoiceFem-VST3${{ github.event_name == 'workflow_dispatch' && inputs.neural == false && '-DSPonly' || '' }}
           path: build/VoiceFem_artefacts/Release/VST3/
           if-no-files-found: error
+
+  models:
+    runs-on: ubuntu-latest
+    name: Download neural models (VoiceFem-models artifact)
+
+    steps:
+      - name: Download models
+        run: |
+          mkdir -p models
+          curl -L --fail --retry 3 -o models/content.onnx \
+            "https://huggingface.co/ozada/onnx_rvc/resolve/main/vec-768-layer-12.onnx"
+          curl -L --fail --retry 3 -o models/voice_woman1.onnx \
+            "https://huggingface.co/ozada/onnx_rvc/resolve/main/woman_1.onnx"
+          curl -L --fail --retry 3 -o models/voice_woman2.onnx \
+            "https://huggingface.co/ozada/onnx_rvc/resolve/main/woman_2.onnx"
+          ls -la models/
+
+      - name: Verify sizes
+        run: |
+          test "$(stat -c%s models/content.onnx)" -gt 300000000
+          test "$(stat -c%s models/voice_woman1.onnx)" -gt 90000000
+          test "$(stat -c%s models/voice_woman2.onnx)" -gt 90000000
+
+      - name: Upload models artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceFem-models
+          path: models/
+          if-no-files-found: error

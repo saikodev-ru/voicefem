@@ -35,6 +35,15 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
     // neural engine introspection for the editor (message thread only)
+    static constexpr const char* kVersionString = "0.3.2";
+    static bool neuralBuilt()
+    {
+#if VFEM_NEURAL
+        return true;
+#else
+        return false;
+#endif
+    }
     juce::StringArray getVoiceNames() const { return voiceNames; }
     juce::String neuralStatus() const;
     static juce::File modelsDir();
@@ -60,6 +69,10 @@ private:
     int loadedVoice = -1;
     juce::StringArray voiceNames;
     std::vector<std::string> voicePaths;
+
+    // retry bookkeeping (message thread only)
+    juce::uint32 lastScanAttempt = 0, lastContentAttempt = 0, lastVoiceAttempt = 0;
+    juce::String statusNote;              // human-readable reason for the current state
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceFemProcessor)
 };

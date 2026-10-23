@@ -3,3 +3,7 @@ test/t
 test/*.exe
 tools/*.onnx
 build.log
+build/
+build_on/
+build_off/
+*.user

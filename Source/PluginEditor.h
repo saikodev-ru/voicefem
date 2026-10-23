@@ -37,6 +37,7 @@ private:
     juce::ComboBox voiceBox;
     juce::Label voiceLabel;
     juce::Label statusLabel;
+    juce::TextButton modelsBtn;
     std::vector<std::unique_ptr<Knob>> knobs;
     std::vector<std::unique_ptr<Choice>> choices;
 

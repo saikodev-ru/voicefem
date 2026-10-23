@@ -74,11 +74,13 @@ juce::File VoiceFemProcessor::modelsDir()
 
 juce::String VoiceFemProcessor::neuralStatus() const
 {
+    if (! neuralBuilt())
+        return "DSP-only build: neural engine not included";
     switch (neuralState.load())
     {
         case 1:  return loadedVoice >= 0 && loadedVoice < voiceNames.size()
                        ? "ready: " + voiceNames[loadedVoice] : "ready";
-        case -1: return "no models found";
+        case -1: return statusNote.isNotEmpty() ? statusNote : "neural unavailable";
         default: return contentLoaded.load() ? "loading voice..." : "loading...";
     }
 }
@@ -117,18 +119,28 @@ void VoiceFemProcessor::prepareToPlay (double sampleRate, int)
 void VoiceFemProcessor::timerCallback()
 {
 #if VFEM_NEURAL
-    // load the model folder once
-    if (voiceNames.isEmpty() && neuralState.load() == 0)
+    const juce::uint32 now = juce::Time::getMillisecondCounter();
+    const bool backoffOk = lastScanAttempt == 0 || now - lastScanAttempt > 2000; // 2 s retry cycle
+
+    // scan the model folder until voices are found; keeps retrying (files may
+    // be installed while the host is running)
+    if (voiceNames.isEmpty() && neuralState.load() != 1 && backoffOk)
     {
+        lastScanAttempt = now;
         const auto dir = modelsDir();
         auto list = nvf::NeuralEngine::scanVoices (dir.getFullPathName().toStdString());
         if (list.empty())
         {
             neuralState = -1;
+            statusNote = "no models in " + dir.getFullPathName();
         }
         else
         {
+            voiceNames.clear();
+            voicePaths.clear();
             for (auto& v : list) { voiceNames.add (juce::String (v.name)); voicePaths.push_back (v.path); }
+            neuralState = 0;
+            statusNote.clear();
             // voice param range stays 0..31; out-of-range values are clamped on use
             if (juce::AudioProcessorEditor* ed = getActiveEditor())
                 if (auto* e = dynamic_cast<VoiceFemEditor*> (ed))
@@ -136,23 +148,34 @@ void VoiceFemProcessor::timerCallback()
         }
     }
 
-    // (re)load the selected voice if needed
     if (! voicePaths.empty())
     {
         const int want = (int) apvts.getRawParameterValue ("voice")->load();
         const int clamped = juce::jlimit (0, (int) voicePaths.size() - 1, want);
-        if (! contentLoaded.load())
+
+        // content encoder: load once, retry with a 2 s backoff while failing
+        if (! contentLoaded.load() && (lastContentAttempt == 0 || now - lastContentAttempt > 2000))
         {
-            const auto cdir = modelsDir();
-            const auto cpath = cdir.getChildFile ("content.onnx").getFullPathName().toStdString();
-            if (neural.loadContent (cpath, std::max (1, (int) juce::SystemStats::getNumCpus() / 2)))
+            lastContentAttempt = now;
+            std::string err;
+            const auto cpath = modelsDir().getChildFile ("content.onnx").getFullPathName().toStdString();
+            if (neural.loadContent (cpath, std::max (1, (int) juce::SystemStats::getNumCpus() / 2), &err))
                 contentLoaded = true;
             else
+            {
                 neuralState = -1;
+                statusNote = "content.onnx: " + juce::String (err);
+            }
         }
-        if (contentLoaded.load() && (neuralState.load() != 1 || clamped != loadedVoice))
+
+        // voice model: (re)load on switch; retry with backoff while failing
+        const bool needVoice = contentLoaded.load() && (neuralState.load() != 1 || clamped != loadedVoice);
+        const bool voiceBackoffOk = lastVoiceAttempt == 0 || now - lastVoiceAttempt > 2000;
+        if (needVoice && voiceBackoffOk)
         {
-            const double sr = neural.loadVoice (voicePaths[(size_t) clamped]);
+            lastVoiceAttempt = now;
+            std::string err;
+            const double sr = neural.loadVoice (voicePaths[(size_t) clamped], &err);
             if (sr > 0)
             {
                 loadedVoice = clamped;
@@ -163,6 +186,7 @@ void VoiceFemProcessor::timerCallback()
             else
             {
                 neuralState = -1;
+                statusNote = "voice model: " + juce::String (err);
             }
         }
     }
