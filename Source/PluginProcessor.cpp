@@ -9,21 +9,23 @@ struct Preset
     float pitch, formant;
     int mode;          // 0 = Shift, 1 = Target
     float target, intonation, breath, body, air, mix, gain, voicing;
+    float natural, deEss;
 };
 
-// name, pitch(st), formant(st), mode, targetHz, intonation, breath, body(dB), air(dB), mix, gain(dB), voicing
+// name, pitch(st), formant(st), mode, targetHz, intonation, breath, body(dB), air(dB), mix, gain(dB), voicing, natural, deEss
 const Preset kPresets[] = {
-    { "Feminine - Standard",       4.5f, 2.5f, 0, 200.f, 1.00f, 0.08f, -2.0f, 2.5f, 1.f, 0.f, 0.55f },
-    { "Feminine - Soft Natural",   3.0f, 1.5f, 0, 200.f, 1.00f, 0.05f, -1.0f, 1.5f, 1.f, 0.f, 0.55f },
-    { "Feminine - Subtle Alto",    2.0f, 1.0f, 0, 200.f, 1.00f, 0.00f, -1.5f, 1.0f, 1.f, 0.f, 0.55f },
-    { "Feminine - Bright",         6.0f, 3.5f, 0, 200.f, 1.15f, 0.10f, -3.0f, 4.0f, 1.f, 0.f, 0.55f },
-    { "Feminine - Young / High",   8.0f, 4.5f, 0, 200.f, 1.20f, 0.10f, -4.0f, 5.0f, 1.f, 0.f, 0.55f },
-    { "Feminine - Breathy Soft",   4.0f, 2.0f, 0, 200.f, 1.00f, 0.35f, -2.0f, 4.0f, 1.f, 0.f, 0.50f },
-    { "Target 200 Hz - Natural",   0.0f, 2.5f, 1, 200.f, 1.00f, 0.08f, -2.0f, 2.5f, 1.f, 0.f, 0.55f },
-    { "Target 220 Hz - Expressive",0.0f, 3.0f, 1, 220.f, 1.25f, 0.10f, -3.0f, 3.5f, 1.f, 0.f, 0.55f },
-    { "Target 180 Hz - Low Alto",  0.0f, 2.0f, 1, 180.f, 1.00f, 0.05f, -1.5f, 2.0f, 1.f, 0.f, 0.55f },
-    { "Timbre Only (keep pitch)",  0.0f, 3.0f, 0, 200.f, 1.00f, 0.05f, -2.0f, 2.0f, 1.f, 0.f, 0.55f },
-    { "Neutral (reference)",       0.0f, 0.0f, 0, 200.f, 1.00f, 0.00f,  0.0f, 0.0f, 1.f, 0.f, 0.55f },
+    { "Feminine - Standard",        4.5f, 2.5f, 0, 200.f, 1.00f, 0.10f, -2.5f, 3.0f, 1.f, 0.f, 0.55f, 0.50f, 0.35f },
+    { "Feminine - Deep Transform",  6.0f, 3.2f, 0, 210.f, 1.10f, 0.14f, -4.0f, 4.0f, 1.f, 0.f, 0.55f, 0.60f, 0.40f },
+    { "Feminine - Soft Natural",    3.0f, 1.5f, 0, 200.f, 1.00f, 0.06f, -1.5f, 2.0f, 1.f, 0.f, 0.55f, 0.45f, 0.30f },
+    { "Feminine - Subtle Alto",     2.0f, 1.0f, 0, 200.f, 1.00f, 0.00f, -1.5f, 1.5f, 1.f, 0.f, 0.55f, 0.40f, 0.25f },
+    { "Feminine - Bright",          6.0f, 3.5f, 0, 205.f, 1.15f, 0.12f, -3.5f, 4.5f, 1.f, 0.f, 0.55f, 0.55f, 0.45f },
+    { "Feminine - Young / High",    8.0f, 4.5f, 0, 210.f, 1.20f, 0.12f, -4.5f, 5.5f, 1.f, 0.f, 0.55f, 0.55f, 0.50f },
+    { "Feminine - Breathy Soft",    4.0f, 2.2f, 0, 200.f, 1.05f, 0.38f, -2.5f, 4.5f, 1.f, 0.f, 0.50f, 0.70f, 0.30f },
+    { "Target 200 Hz - Natural",    0.0f, 2.5f, 1, 200.f, 1.00f, 0.10f, -2.5f, 3.0f, 1.f, 0.f, 0.55f, 0.50f, 0.35f },
+    { "Target 220 Hz - Expressive", 0.0f, 3.0f, 1, 220.f, 1.25f, 0.12f, -3.5f, 4.0f, 1.f, 0.f, 0.55f, 0.60f, 0.40f },
+    { "Target 180 Hz - Low Alto",   0.0f, 2.0f, 1, 180.f, 1.00f, 0.06f, -2.0f, 2.5f, 1.f, 0.f, 0.55f, 0.45f, 0.30f },
+    { "Timbre Only (keep pitch)",   0.0f, 3.0f, 0, 200.f, 1.00f, 0.06f, -2.5f, 2.5f, 1.f, 0.f, 0.55f, 0.45f, 0.35f },
+    { "Neutral (reference)",        0.0f, 0.0f, 0, 200.f, 1.00f, 0.00f,  0.0f, 0.0f, 1.f, 0.f, 0.55f, 0.00f, 0.00f },
 };
 constexpr int kNumPresets = (int) (sizeof (kPresets) / sizeof (kPresets[0]));
 } // namespace
@@ -42,9 +44,11 @@ APVTS::ParameterLayout VoiceFemProcessor::createLayout()
     p.push_back (std::make_unique<C> (juce::ParameterID { "mode", 1 }, "Pitch Mode", juce::StringArray { "Shift", "Target" }, 0));
     p.push_back (std::make_unique<F> (juce::ParameterID { "target", 1 }, "Target Hz", NR (100.f, 400.f, 1.f), 200.f));
     p.push_back (std::make_unique<F> (juce::ParameterID { "intonation", 1 }, "Intonation", NR (0.f, 1.5f, 0.01f), 1.f));
-    p.push_back (std::make_unique<F> (juce::ParameterID { "breath", 1 }, "Breath", NR (0.f, 1.f, 0.01f), 0.08f));
-    p.push_back (std::make_unique<F> (juce::ParameterID { "body", 1 }, "Body (dB)", NR (-12.f, 6.f, 0.1f), -2.f));
-    p.push_back (std::make_unique<F> (juce::ParameterID { "air", 1 }, "Air (dB)", NR (-6.f, 12.f, 0.1f), 2.5f));
+    p.push_back (std::make_unique<F> (juce::ParameterID { "breath", 1 }, "Breath", NR (0.f, 1.f, 0.01f), 0.10f));
+    p.push_back (std::make_unique<F> (juce::ParameterID { "body", 1 }, "Body (dB)", NR (-12.f, 6.f, 0.1f), -2.5f));
+    p.push_back (std::make_unique<F> (juce::ParameterID { "air", 1 }, "Air (dB)", NR (-6.f, 12.f, 0.1f), 3.f));
+    p.push_back (std::make_unique<F> (juce::ParameterID { "natural", 1 }, "Natural", NR (0.f, 1.f, 0.01f), 0.5f));
+    p.push_back (std::make_unique<F> (juce::ParameterID { "deess", 1 }, "De-Ess", NR (0.f, 1.f, 0.01f), 0.35f));
     p.push_back (std::make_unique<F> (juce::ParameterID { "mix", 1 }, "Mix", NR (0.f, 1.f, 0.01f), 1.f));
     p.push_back (std::make_unique<F> (juce::ParameterID { "gain", 1 }, "Output (dB)", NR (-12.f, 12.f, 0.1f), 0.f));
     p.push_back (std::make_unique<F> (juce::ParameterID { "voicing", 1 }, "Voicing Thr", NR (0.3f, 0.85f, 0.01f), 0.55f));
@@ -111,6 +115,8 @@ void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     P.mix = get ("mix");
     P.outDb = get ("gain");
     P.voicingThresh = get ("voicing");
+    P.natural = get ("natural");
+    P.deEss = get ("deess");
     engine.setParams (P);
 
     const int chans = juce::jmin (numIn, numOut);
@@ -153,6 +159,8 @@ void VoiceFemProcessor::setCurrentProgram (int index)
     set ("breath", s.breath);
     set ("body", s.body);
     set ("air", s.air);
+    set ("natural", s.natural);
+    set ("deess", s.deEss);
     set ("mix", s.mix);
     set ("gain", s.gain);
     set ("voicing", s.voicing);

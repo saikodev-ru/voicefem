@@ -19,6 +19,8 @@ VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p
     addKnob ("breath", "Breath");
     addKnob ("body", "Body");
     addKnob ("air", "Air");
+    addKnob ("natural", "Natural");
+    addKnob ("deess", "De-Ess");
     addKnob ("voicing", "Voicing");
     addKnob ("mix", "Mix");
     addKnob ("gain", "Output");
@@ -26,7 +28,7 @@ VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p
     addChoice ("mode", "Pitch Mode");
     addChoice ("range", "Voice Range");
 
-    setSize (760, 400);
+    setSize (760, 470);
 }
 
 void VoiceFemEditor::addKnob (const char* id, const char* text)
@@ -61,6 +63,9 @@ void VoiceFemEditor::paint (juce::Graphics& g)
     g.setColour (juce::Colour (0xffe9a8d0));
     g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
     g.drawText ("VoiceFem", 16, 10, 200, 30, juce::Justification::centredLeft);
+    g.setColour (juce::Colour (0xff6b6478));
+    g.setFont (juce::FontOptions (13.0f));
+    g.drawText ("realtime feminine voice engine v2", 220, 16, 300, 20, juce::Justification::centredLeft);
 }
 
 void VoiceFemEditor::resized()
@@ -83,7 +88,7 @@ void VoiceFemEditor::resized()
     }
 
     area.removeFromTop (8);
-    const int cols = 5, rows = 2;
+    const int cols = 4, rows = 3;
     const int cw = area.getWidth() / cols, ch = area.getHeight() / rows;
     for (size_t i = 0; i < knobs.size(); ++i)
     {
