@@ -75,6 +75,8 @@ juce_add_plugin(VoiceFem
     VST3_CATEGORIES Fx Pitch\ Shift
     COPY_PLUGIN_AFTER_BUILD FALSE)
 
+juce_add_binary_data(VoiceFemData SOURCES tools/pth_to_onnx.py)
+
 target_sources(VoiceFem PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginProcessor.h
@@ -97,6 +99,7 @@ target_compile_definitions(VoiceFem PUBLIC
 target_link_libraries(VoiceFem
     PRIVATE
         juce::juce_audio_utils
+        VoiceFemData
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

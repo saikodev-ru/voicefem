@@ -8,7 +8,7 @@ class VoiceFemProcessor : public juce::AudioProcessor,
 {
 public:
     VoiceFemProcessor();
-    ~VoiceFemProcessor() override = default;
+    ~VoiceFemProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -39,6 +39,11 @@ public:
     juce::String neuralStatus() const;
     static juce::File modelsDir();
 
+    // model import: .onnx is copied as-is, .pth is converted via the bundled python tool
+    void importModel (const juce::File& file);
+    juce::String getImportStatus() const;
+    void rescanModels();
+
     void timerCallback();
 
 private:
@@ -60,6 +65,12 @@ private:
     int loadedVoice = -1;
     juce::StringArray voiceNames;
     std::vector<std::string> voicePaths;
+
+    mutable juce::CriticalSection importLock;
+    juce::String importStatus;
+    std::atomic<bool> shuttingDown { false };
+    std::atomic<bool> rescanRequested { false };
+    juce::ThreadPool importPool { 1 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceFemProcessor)
 };
