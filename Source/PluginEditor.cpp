@@ -14,9 +14,11 @@ DyVocalizerEditor::DyVocalizerEditor (DyVocalizerProcessor& p) : AudioProcessorE
     addChoice ("engine", "Engine");
     addChoice ("mode", "Pitch Mode");
     addChoice ("range", "Voice Range");
-    choices[0]->box.setTooltip ("DSP = fast, light, no models needed.  Neural = full voice change using a model (.pth/.onnx).");
+    addChoice ("quality", "AI Quality");
+    choices[0]->box.setTooltip ("Neural (AI) = full voice change using a model - recommended.  DSP = light PSOLA fallback, no models needed.");
     choices[1]->box.setTooltip ("Shift = fixed semitone shift.  Target = automatically aims your average pitch at Target Hz.");
-    choices[2]->box.setTooltip ("Lowest pitch of your voice. Deeper = more latency but safer tracking.");
+    choices[2]->box.setTooltip ("Lowest pitch of your voice. Deeper = more latency but safer tracking. DSP engine only.");
+    choices[3]->box.setTooltip ("Neural latency preset:\nFast ~80 ms / Smooth ~160 ms (recommended) / Max ~260 ms (best quality).\nNOTE: lower latency = higher CPU load (inference runs more often).\nIf audio stutters, pick Smooth or Max. Switching restarts the AI stream.");
     choices[0]->box.onChange = [this] { updateEnabledStates(); };
     choices[1]->box.onChange = [this] { updateEnabledStates(); };
 
@@ -137,6 +139,7 @@ void DyVocalizerEditor::updateEnabledStates()
     if (auto* k = knobFor ("pitch"))   k->slider.setEnabled (! target);
     if (auto* k = knobFor ("target"))  k->slider.setEnabled (target);
     choices[2]->box.setEnabled (! neural);
+    choices[3]->box.setEnabled (neural);
     voiceBox.setEnabled (neural && voiceBox.getNumItems() > 0 && proc.getVoiceNames().size() > 0);
     repaint();
 }
@@ -244,10 +247,11 @@ void DyVocalizerEditor::resized()
     area.reduce (12, 8);
 
     auto selRow = area.removeFromTop (28);
-    const int third = selRow.getWidth() / 3;
-    for (int i = 0; i < (int) choices.size() && i < 3; ++i)
+    const int cells = juce::jmax (1, (int) choices.size());
+    const int cellw = selRow.getWidth() / cells;
+    for (int i = 0; i < (int) choices.size(); ++i)
     {
-        auto cell = selRow.removeFromLeft (third);
+        auto cell = selRow.removeFromLeft (cellw);
         choices[(size_t) i]->label.setBounds (cell.removeFromLeft (80));
         choices[(size_t) i]->box.setBounds (cell.reduced (6, 2).withWidth (juce::jmin (170, cell.getWidth() - 12)));
     }

@@ -35,7 +35,7 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
     // neural engine introspection for the editor (message thread only)
-    static constexpr const char* kVersionString = "0.3.2";
+    static constexpr const char* kVersionString = "0.4.0";
     static bool neuralBuilt()
     {
 #if DYV_NEURAL
@@ -66,7 +66,9 @@ private:
     double currentSampleRate = 48000.0;
     int currentRange = -1;
     int currentEngine = 0;
+    int currentQuality = -1;
     int currentProgram = 0;
+    std::vector<float> monoBuf, dryBuf;   // block scratch (audio thread)
 
     // neural loading state (touched on message thread + atomics for audio thread)
     std::atomic<int> neuralState { 0 };   // 0 = no models, 1 = ready, -1 = failed

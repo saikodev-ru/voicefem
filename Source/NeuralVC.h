@@ -1,29 +1,51 @@
 // NeuralVC.h
 // Optional neural real-time voice conversion engine (no JUCE dependency).
 //
-// Pipeline (streaming, chunked with overlap-crossfade):
+// Pipeline v2 (block streaming, overlap-render + linear crossfade):
 //
 //   host SR mono -> resample 16k -> [content encoder .onnx] -> features [1,T,768]
 //                                          |
-//                             NSDF F0 (per frame, 50 fps) -> transpose/intonate
+//                             NSDF F0 (per frame, 50 fps, position-cached) -> transpose/intonate
 //                                          |
 //                       [RVC generator .onnx] -> audio @ model SR -> resample host
 //                                          |
-//                       1-frame overlap crossfade -> delay line -> out
+//                       linear crossfade on the overlap -> delay ring -> out
 //
 // Compatible with the common RVC / w-okada ONNX export convention:
-//   content model:  float [1, N] @16k            -> float [1, T, 768]  (T = N/320)
+//   content model:  float [1, N] @16k            -> float [1, T, 768]
 //   generator:      phone float [1,T,768] (or [T,768])
 //                   phone_lengths int64 [1]
 //                   pitch int64 [1,T]  (coarse 1..255)
 //                   pitchf float [1,T] (Hz)
-//                   ds/sid int64 [1] (optional)  -> audio float [1,1,M] @ model SR
-// Input tensors are matched adaptively by name/type, so most RVC exports load.
+//                   ds/sid int64 [1] (optional), rnd float (optional)
+//                   -> audio float [1,1,M] @ model SR
 //
-// Frame math (exact, keeps delay line balanced):
-//   hop = 320 @16k (20 ms). Window = ctx(1) + chunk(2) frames = 960 samples.
-//   Consumed per step: chunk frames. Emitted: (chunk+1) frames of audio; the
-//   first emitted frame crossfades with the tail of the previous emission.
+// Frame math (exact, keeps the output timeline balanced):
+//   A step renders T_r = chunk + overlap frames of audio. The first `overlap`
+//   frames re-render the same input region the previous step rendered in its
+//   tail, so the two renders of the overlap can be linearly crossfaded. Per
+//   step the engine consumes `chunk` frames (hop = 320 @16k = 20 ms) and
+//   advances the output by exactly chunk frames.
+//
+//   Context frames (ctxL past / ctxR future) sharpen the content-encoder
+//   features without being rendered. One extra hop prefix compensates exports
+//   that lose up to 320 samples at the window head.
+//
+// Quality presets (chunk / overlap / context, approximate latency @48 kHz):
+//   Fast   2 / 1 / (1,0)   ~80 ms   - boundary every 40 ms, crossfade 20 ms
+//   Smooth 4 / 2 / (2,1)   ~160 ms  - boundary every 80 ms, crossfade 40 ms
+//   Max    8 / 3 / (2,1)   ~260 ms  - boundary every 160 ms, crossfade 60 ms
+//
+// Anti-chop design notes:
+//   - F0 is analysed ONCE per absolute 16k position and cached, so overlapping
+//     windows see identical pitch for the same frame (stateful detectors would
+//     otherwise re-analyse overlap frames differently and crossfade renders of
+//     different pitch).
+//   - Unvoiced frames feed 0 Hz (RVC training convention) instead of a frozen
+//     voiced pitch; single-frame dropouts are interpolated.
+//   - All step buffers are preallocated for the largest preset; switching
+//     quality only recomputes scalars (guarded by a try_lock - the audio
+//     thread bypasses a block if a geometry update is in flight).
 #pragma once
 #if DYV_NEURAL
 // Do NOT let the ORT C++ header initialise its API table in a static
@@ -47,6 +69,7 @@ bool dyvLoadOrt(); // OrtDelayLoad.cpp: LoadLibrary onnxruntime.dll from the plu
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -55,8 +78,6 @@ namespace nvf
 {
 constexpr float kPiF = 3.14159265f;
 constexpr int kHop16 = 320;          // ContentVec hop @16 kHz (20 ms)
-constexpr int kCtxFrames = 1;        // context frames before the chunk
-constexpr int kChunkFrames = 2;      // new frames per inference step
 constexpr int kFeatDim = 768;        // ContentVec feature width
 
 // ------------------------------------------------------------- resampler
@@ -101,7 +122,7 @@ struct F0Detector
     float lastF0 = 0.f, confS = 0.f;
     std::vector<float> buf;
     int64_t head = 0;                  // absolute 16k sample count
-    std::vector<float> nsdf, seg;
+    std::vector<float> seg;
 
     void reset() { buf.assign (1 << 14, 0.f); head = 0; lastF0 = 0; confS = 0; }
     void push (const float* x, int n)
@@ -280,11 +301,10 @@ public:
 
     struct VoiceInfo { std::string name, path; };
 
-    // scan a folder: content encoder must be content.onnx; voices = voice_*.onnx / *.onnx
+    // scan a folder: content encoder must be content.onnx; voices = *.onnx
     static std::vector<VoiceInfo> scanVoices (const std::string& dir)
     {
         std::vector<VoiceInfo> out;
-        // tiny dirent-free listing via std::filesystem
         namespace fs = std::filesystem;
         std::error_code ec;
         if (! fs::is_directory (dir, ec)) return out;
@@ -323,9 +343,9 @@ public:
         if (! s) { lastErr_ = e; if (err) *err = e; return 0.0; }
         lastErr_.clear();
 
-        // probe: silent inference reveals samples-per-input-frame -> model SR
-        // and frame semantics (RVC v2 generators consume 100 fps inputs:
-        // they emit modelSr/100 samples per 50 fps ContentVec frame).
+        // probe: silent inference reveals samples-per-input-frame -> model SR,
+        // frame semantics (RVC v2 generators consume 100 fps inputs) and
+        // whether the time dimension is dynamic or locked to one size.
         auto runProbe = [&] (int Tp, double& spfOut) -> bool
         {
             try
@@ -419,33 +439,59 @@ public:
             return 0.0;
         };
 
+        // Largest feed first: dynamic-T exports accept it; a T-locked export
+        // fails and we fall through to its locked size.
+        int tOk = 0;
         double spf = 0.0;
-        int probeT = 0;
-        if (runProbe (3, spf)) probeT = 3;
-        else if (runProbe (6, spf)) probeT = 6;
-        if (probeT == 0)
+        for (int Tp : { 2 * kTrMax, kTrMax, 6, 3 })
+            if (runProbe (Tp, spf)) { tOk = Tp; break; }
+        if (tOk == 0)
         {
             if (lastErr_.empty()) lastErr_ = "model probe failed";
             return 0.0;
         }
 
-        const double sr50 = snapRate (spf * 50.0);
-        const double sr100 = snapRate (spf * 100.0);
-        if (sr50 > 0.0)       { modelSr = sr50;    fps100_ = false; }
-        else if (sr100 > 0.0) { modelSr = sr100;   fps100_ = true;  }
-        else                  { modelSr = 48000.0; fps100_ = false; }
-
-        // streaming feeds exactly 6 frames in 100 fps mode, 3 otherwise;
-        // T-locked exports must accept their runtime shape
-        const int feedT = fps100_ ? 6 : 3;
-        if (feedT != probeT)
+        // Locked or dynamic? If a smaller size also renders, the time axis is
+        // dynamic and every streaming T works.
+        bool fps100 = false;
+        double modelSrLocal = 48000.0;
         {
-            double tmp = 0.0;
-            if (! runProbe (feedT, tmp))
+            const double sr50 = snapRate (spf * 50.0);
+            const double sr100 = snapRate (spf * 100.0);
+            if (sr50 > 0.0)       { modelSrLocal = sr50;    fps100 = false; }
+            else if (sr100 > 0.0) { modelSrLocal = sr100;   fps100 = true;  }
+        }
+
+        int tExact = 0;
+        if (tOk >= 6)
+        {
+            double s2 = 0.0;
+            if (! runProbe (std::max (3, tOk / 2), s2))
+                tExact = tOk;
+        }
+
+        if (tExact > 0)
+        {
+            const int trLock = tExact / (fps100 ? 2 : 1);
+            if (fps100 && (tExact % 2) != 0)
             {
-                lastErr_ = "model does not accept the streaming frame count - re-export with tools/pth_to_onnx.py";
+                lastErr_ = "model locks an odd frame count - re-export with tools/pth_to_onnx.py";
                 return 0.0;
             }
+            if (trLock > kTrMax)
+            {
+                lastErr_ = "model locks an oversized frame count - re-export with tools/pth_to_onnx.py";
+                return 0.0;
+            }
+        }
+
+        // commit geometry under the audio-thread lock, then swap the session
+        {
+            std::lock_guard<std::mutex> sl (geomMtx_);
+            fps100_ = fps100;
+            modelSr = modelSrLocal;
+            tExact_ = tExact;
+            applyGeometry();
         }
         swapVoice (std::move (s));
         return modelSr;
@@ -459,103 +505,235 @@ public:
         auto* old = gen_.exchange (s.release());
         if (old)
         {
-            // retire after a grace period >> chunk duration (audio thread safety)
-            std::thread ([old]() { std::this_thread::sleep_for (std::chrono::milliseconds (400)); delete old; }).detach();
+            // retire after a grace period >> step duration (audio thread safety)
+            std::thread ([old]() { std::this_thread::sleep_for (std::chrono::milliseconds (900)); delete old; }).detach();
         }
         voiceLoaded_ = true;
     }
 
     bool voiceReady() const { return voiceLoaded_ && content_ != nullptr; }
 
+    // ---- quality (0 Fast / 1 Smooth / 2 Max) --------------------------------
+    // The switch itself happens at the next processBlock; this only records
+    // the request, so it is safe from any thread.
+    void requestQuality (int q) { pendingQuality_.store (q < 0 ? 0 : (q > 2 ? 2 : q)); }
+    int quality() const { return pendingQuality_.load(); }
+
     void prepare (double hostSampleRate)
     {
+        std::lock_guard<std::mutex> sl (geomMtx_);
         hostSr = hostSampleRate;
         rsIn.ratio = 16000.0 / hostSampleRate;   // host -> content encoder rate
-        chunk16 = kCtxFrames * kHop16 + kChunkFrames * kHop16;    // 960
-        consume16 = kChunkFrames * kHop16;                        // 640
-        opfHost = (int) std::lround (hostSr / 50.0);              // audio samples per frame @host
-        tailLen = opfHost;                                        // 1-frame crossfade
-        L = (kCtxFrames + kChunkFrames + 1) * (int) std::lround (0.02 * hostSr);
-        latency = L - tailLen;                                    // true input->out delay
-        delayCap = (size_t) L + (size_t) (kChunkFrames + 3) * opfHost + 64;
-        reset();
+        ensureCapacity();
+        applyGeometry();
+        resetNow();
     }
 
-    int getLatency() const { return latency; }
-
-    void reset()
+    // latency in host samples for the pending quality (pure computation)
+    int getLatency() const
     {
-        rsIn.reset(); rsOut.reset();
-        acc16.clear(); f0.reset();
-        outAcc.clear();
-        delay.assign (delayCap, 0.f);
-        dWrite = (size_t) tailLen;   // virtual zero tail pre-written
-        readPos = (dWrite + delayCap * 8 - (size_t) L) % delayCap;
-        tail.assign ((size_t) std::max (1, tailLen), 0.f);
-        lastF0Hold = 0.f; medianLog = std::log (130.f);
-        nIn = 0; nOut = 0;
+        Preset p = presetOf (pendingQuality_.load());
+        int tr = p.chunk + p.over;
+        if (tExact_ > 0) tr = tExact_ / (fps100_ ? 2 : 1);
+        tr = std::max (2, tr);
+        return (tr + p.ctxR + 1) * opfHost;
     }
+
+    // asynchronous reset: the audio thread performs it before the next block
+    void reset() { pendingReset_.store (true); }
 
     void setParams (float pitchSemis, bool targetMode, float targetHz, float intonation)
     {
         semi = pitchSemis; tMode = targetMode; tHz = targetHz; into = intonation;
     }
 
-    // sample-by-sample, mirrors dyv::Engine::process
-    float process (float x)
+    // ---- block processing (no per-sample allocations) -----------------------
+    // in == out (in-place) is supported. Never blocks the audio thread: if a
+    // geometry update is in flight the block is passed through untouched.
+    void processBlock (const float* in, float* out, int n)
     {
-        if (! voiceReady()) return 0.f;
+        if (n <= 0) return;
+        if (! geomMtx_.try_lock()) { if (in != out) std::copy_n (in, (size_t) n, out); return; }
+        LockGuard guard { geomMtx_ };
 
-        // host -> 16k
-        std::vector<float> tmp;
-        rsIn.push (&x, 1, tmp);
-        if (! tmp.empty())
+        if (pendingReset_.exchange (false)) resetNow();
+
+        if (pendingQuality_.load() != quality_)
         {
-            f0.push (tmp.data(), (int) tmp.size());
-            acc16.insert (acc16.end(), tmp.begin(), tmp.end());
+            quality_ = pendingQuality_.load();
+            applyGeometry();
+            resetNow();
         }
-        nIn++;
 
-        // run steps while enough 16k audio is buffered (keeps latency bounded).
-        // kHop16 of extra prefix guarantees the content encoder yields >= T frames
-        // (several exports lose up to one hop at the window head:
-        // frames = floor((N - L) / 320), L in (0, 320]).
-        while ((int) acc16.size() >= chunk16 + kHop16)
+        if (! voiceReady())
         {
-            if ((int) acc16.size() > 6 * (chunk16 + kHop16)) // CPU-starved: shed old audio
-                acc16.erase (acc16.begin(), acc16.end() - 4 * (chunk16 + kHop16));
+            if (in != out) std::copy_n (in, (size_t) n, out);
+            return;
+        }
+
+        // host -> 16k (batched)
+        tmp16.clear();
+        rsIn.push (in, n, tmp16);
+        if (! tmp16.empty())
+        {
+            f0.push (tmp16.data(), (int) tmp16.size());
+            acc16.insert (acc16.end(), tmp16.begin(), tmp16.end());
+        }
+        nIn += n;
+
+        // run steps while enough 16k audio is buffered
+        while ((int) acc16.size() >= feed16)
+        {
+            if ((int) acc16.size() > 3 * feed16)           // CPU-starved: shed old audio
+                acc16.erase (acc16.begin(), acc16.end() - (size_t) (feed16 + 2 * kHop16));
             runStep();
         }
 
-        // read from delay line: cursor sweeps one sample per call and sits
-        // L samples behind the write head (a fixed index would sample-and-hold
-        // the whole block - the ring is written in bursts per inference step)
-        const float y = delay[readPos % delayCap];
-        ++readPos;
-        nOut++;
+        // read from the self-regulating output queue; a shallow queue (startup
+        // latency fill, CPU-starve underrun) yields zeros - no drift correction
+        // is needed because production and consumption run at exactly 1:1.
+        const size_t avail = outQueue.size() - qHead;
+        const int m = (int) std::min ((size_t) n, avail);
+        if (m > 0) std::copy_n (outQueue.begin() + (ptrdiff_t) qHead, (size_t) m, out);
+        for (int i = m; i < n; ++i) out[i] = 0.f;
+        qHead += (size_t) m;
+        nOut += n;
+
+        if (qHead > (size_t) (4 * keepSmp))               // compact consumed prefix
+        {
+            outQueue.erase (outQueue.begin(), outQueue.begin() + (ptrdiff_t) qHead);
+            qHead = 0;
+        }
+    }
+
+    // sample-by-sample compatibility wrapper
+    float process (float x)
+    {
+        float y = x;
+        processBlock (&x, &y, 1);
         return y;
     }
 
     int64_t processedIn() const { return nIn; }
 
 private:
+    struct LockGuard
+    {
+        std::mutex& m;
+        ~LockGuard() { m.unlock(); }
+    };
+
+    // ---- quality presets -----------------------------------------------------
+    struct Preset { int ctxL, ctxR, chunk, over; };
+
+    static Preset presetOf (int q)
+    {
+        switch (q)
+        {
+            case 0:  return Preset { 1, 0, 2, 1 };   // Fast
+            case 2:  return Preset { 2, 1, 8, 3 };   // Max
+            default: return Preset { 2, 1, 4, 2 };   // Smooth
+        }
+    }
+
+    static constexpr int kTrMax = 12;   // largest rendered-frames count we accept
+
+    // Recompute streaming geometry from the current quality (and any model
+    // constraints discovered at load). Scalars only - allocation-free, called
+    // under geomMtx_.
+    void applyGeometry()
+    {
+        Preset p = presetOf (quality_);
+        int tr = p.chunk + p.over;                       // rendered frames / step
+        if (tExact_ > 0)
+            tr = tExact_ / (fps100_ ? 2 : 1);            // locked exports dictate T
+        tr = std::max (2, std::min (kTrMax, tr));
+        const int ov = std::max (1, std::min (p.over, tr - 1));
+        const int ch = tr - ov;
+
+        ctxL = p.ctxL; ctxR = p.ctxR;
+        chunk = ch; over = ov;
+        tr_ = tr;
+        winFrames = ctxL + tr + ctxR;
+        feed16 = (winFrames + 1) * kHop16;               // +1 hop: export head loss
+        consume16 = chunk * kHop16;
+        opfHost = std::max (1, (int) std::lround (hostSr / 50.0));
+        keepSmp = tr * opfHost;
+        tailLen = ov * opfHost;
+        latency_ = (tr + ctxR + 1) * opfHost;
+    }
+
+    // Allocate every buffer for the LARGEST accepted geometry once. Called
+    // from prepare() (host thread) only; afterwards nothing reallocates.
+    void ensureCapacity()
+    {
+        const int winMax = 2 + kTrMax + 1;
+        const int feedMax = (winMax + 1) * kHop16;
+        const int fh = std::max (1, (int) std::lround (hostSr / 50.0));
+
+        acc16.reserve ((size_t) (4 * feedMax));
+        acc16.clear();
+        tmp16.reserve ((size_t) (feedMax + 64));
+        winBuf.reserve ((size_t) (feedMax + 64));
+        featBuf.reserve ((size_t) (2 * kTrMax * kFeatDim));
+        f0out.reserve ((size_t) (2 * kTrMax + 8));
+        coarseBuf.reserve ((size_t) (2 * kTrMax + 8));
+        pitchfBuf.reserve ((size_t) (winMax + 8));
+        emitted.reserve ((size_t) (2 * kTrMax * fh + 64));
+        outAcc.reserve ((size_t) (4 * kTrMax * fh));
+        outQueue.reserve ((size_t) (12 * kTrMax * fh));
+    }
+
+    // full state reset - runs on the audio thread (under geomMtx_) or in
+    // prepare(); never reallocates the ring.
+    void resetNow()
+    {
+        rsIn.reset(); rsOut.reset();
+        acc16.clear(); f0.reset();
+        f0cache.clear();
+        outAcc.clear();
+        emitted.clear();
+        outQueue.clear();
+        qHead = 0;
+        medianLog = std::log (130.f);
+        nIn = 0; nOut = 0;
+    }
+
+    // ---- position-cached F0 so overlapping windows agree --------------------
+    struct F0Cache
+    {
+        static constexpr int N = 128;
+        int64_t key[N] {};
+        float val[N] {};
+        int pos = 0;
+        void clear() { for (int i = 0; i < N; ++i) key[i] = -1; pos = 0; }
+        float* find (int64_t k)
+        {
+            for (int i = 0; i < N; ++i) if (key[i] == k) return &val[i];
+            return nullptr;
+        }
+        void put (int64_t k, float v)
+        {
+            key[pos] = k; val[pos] = v;
+            pos = (pos + 1) % N;
+        }
+    };
+
     void runStep()
     {
         auto* gen = gen_.load();
         if (gen == nullptr || content_ == nullptr) { acc16.erase (acc16.begin(), acc16.begin() + consume16); return; }
 
         // ---- window (aligned with the absolute 16k timeline even if buffered)
-        const int T = chunk16 / kHop16; // total frames in window (ctx + chunk)
-        const int64_t surplus = (int64_t) acc16.size() - (chunk16 + kHop16);
+        const int64_t surplus = (int64_t) acc16.size() - feed16;
         const int64_t winEndAbs = f0.head - surplus;   // absolute 16k index of window end
-        std::vector<float> win (acc16.begin(), acc16.begin() + (chunk16 + kHop16));
+        winBuf.assign (acc16.begin(), acc16.begin() + feed16);
 
-        // ---- content features
         try
         {
             Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu (OrtArenaAllocator, OrtMemTypeDefault);
 
-            // find content input (float, rank 2 or 3)
+            // ---- content features
             int ci = -1;
             for (size_t i = 0; i < content_->io.inNames.size(); ++i)
                 if (content_->io.inTypes[i] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
@@ -563,12 +741,11 @@ private:
                     { ci = (int) i; break; }
             if (ci < 0) { acc16.erase (acc16.begin(), acc16.begin() + consume16); return; }
 
-            // feed matching the declared rank: [1,N] or [1,1,N]
             Ort::Value wT = content_->io.inShapes[(size_t) ci].size() == 3
-                ? [&] { std::array<int64_t, 3> wd { 1, 1, (int64_t) win.size() };
-                        return Ort::Value::CreateTensor<float> (mi, win.data(), win.size(), wd.data(), 3); } ()
-                : [&] { std::array<int64_t, 2> wd { 1, (int64_t) win.size() };
-                        return Ort::Value::CreateTensor<float> (mi, win.data(), win.size(), wd.data(), 2); } ();
+                ? [&] { std::array<int64_t, 3> wd { 1, 1, (int64_t) winBuf.size() };
+                        return Ort::Value::CreateTensor<float> (mi, winBuf.data(), winBuf.size(), wd.data(), 3); } ()
+                : [&] { std::array<int64_t, 2> wd { 1, (int64_t) winBuf.size() };
+                        return Ort::Value::CreateTensor<float> (mi, winBuf.data(), winBuf.size(), wd.data(), 2); } ();
 
             const char* inNames[] = { content_->io.inNames[(size_t) ci].c_str() };
             auto out = content_->ses->Run (Ort::RunOptions { nullptr }, inNames, &wT, 1,
@@ -578,60 +755,63 @@ private:
             auto oi = out[0].GetTensorTypeAndShapeInfo();
             auto osh = oi.GetShape();
             const float* feat = out[0].GetTensorData<float>();
-            // normalize to [T, 768]
             int64_t featT = 0, featD = 768;
             if (osh.size() == 3) { featT = osh[1]; featD = osh[2]; }
             else if (osh.size() == 2) { featT = osh[0]; featD = osh[1]; }
-            if (featT < T || featD != kFeatDim) { acc16.erase (acc16.begin(), acc16.begin() + consume16); return; }
-            const int64_t off = featT - T; // use the LAST T frames
-            // ---- per-frame F0 on the 16k window (frames end at hop boundaries)
-            std::vector<float> pitchf ((size_t) T, 0.f);
-            const float f0thr = 0.42f;
-            for (int t = 0; t < T; ++t)
-            {
-                const int64_t endAbs = winEndAbs - chunk16 + (int64_t) (t + 1) * kHop16;
-                pitchf[(size_t) t] = f0.analyse (endAbs, f0thr);
-            }
-            // hold last voiced value over unvoiced frames (matches RVC training fill)
-            for (int t = 0; t < T; ++t)
-            {
-                if (pitchf[(size_t) t] > 1.f) lastF0Hold = pitchf[(size_t) t];
-                else pitchf[(size_t) t] = lastF0Hold;
-            }
-            // running median (log EWMA) for target alignment
-            for (int t = 0; t < T; ++t)
-                if (pitchf[(size_t) t] > 1.f)
-                    medianLog += 0.004f * (std::log (pitchf[(size_t) t]) - medianLog);
+            if (featT < winFrames || featD != kFeatDim)
+            { acc16.erase (acc16.begin(), acc16.begin() + consume16); return; }
+            const int64_t off = featT - winFrames;      // use the LAST winFrames
 
-            const float base = tMode ? (float) (tHz / std::exp (medianLog)) : std::pow (2.f, semi / 12.f);
-            std::vector<float> f0out ((size_t) T);
-            std::vector<int64_t> coarse ((size_t) T);
-            for (int t = 0; t < T; ++t)
+            // ---- per-frame F0 over the whole window (position-cached)
+            pitchfBuf.assign ((size_t) winFrames, 0.f);
+            const float f0thr = 0.42f;
+            for (int t = 0; t < winFrames; ++t)
             {
-                const float f = pitchf[(size_t) t];
+                const int64_t endAbs = winEndAbs - feed16 + (int64_t) (t + 1) * kHop16;
+                if (const float* hit = f0cache.find (endAbs))
+                {
+                    pitchfBuf[(size_t) t] = *hit;
+                    continue;
+                }
+                const float f = f0.analyse (endAbs, f0thr);
+                f0cache.put (endAbs, f);
+                pitchfBuf[(size_t) t] = f;
+                if (f > 1.f)
+                    medianLog += 0.004f * (std::log (f) - medianLog);   // fresh frames only
+            }
+
+            // unvoiced convention: 0 Hz fed to the generator; interpolate
+            // single-frame dropouts so vowel tails do not flicker off
+            for (int t = 0; t < winFrames; ++t)
+                if (pitchfBuf[(size_t) t] <= 1.f
+                    && t > 0 && t + 1 < winFrames
+                    && pitchfBuf[(size_t) t - 1] > 1.f && pitchfBuf[(size_t) t + 1] > 1.f)
+                    pitchfBuf[(size_t) t] = 0.5f * (pitchfBuf[(size_t) t - 1] + pitchfBuf[(size_t) t + 1]);
+
+            // ---- slice to the rendered span and transpose
+            const int Tr = tr_;
+            const int Tfeed = fps100_ ? 2 * Tr : Tr;
+            f0out.assign ((size_t) Tfeed, 0.f);
+            coarseBuf.assign ((size_t) Tfeed, 0);
+            const float base = tMode ? (float) (tHz / std::exp (medianLog)) : std::pow (2.f, semi / 12.f);
+            for (int t = 0; t < Tr; ++t)
+            {
+                const float f = pitchfBuf[(size_t) (ctxL + t)];
                 float fo = 0.f;
                 if (f > 1.f)
                 {
                     fo = f * base * std::exp (std::log (f / std::exp (medianLog)) * (into - 1.f));
                     fo = std::min (600.f, std::max (40.f, fo));
                 }
-                f0out[(size_t) t] = fo;
-                coarse[(size_t) t] = coarseOf (fo);
-            }
-
-            // RVC v2 generators consume 100 fps inputs: duplicate the 50 fps
-            // frames (nearest upsampling) before feeding phone/pitch tensors
-            const int Tfeed = fps100_ ? 2 * T : T;
-            if (fps100_)
-            {
-                f0out.resize ((size_t) Tfeed);
-                coarse.resize ((size_t) Tfeed);
-                for (int t = T - 1; t >= 0; --t)
+                if (fps100_)
                 {
-                    f0out[(size_t) (2 * t + 1)] = f0out[(size_t) t];
-                    f0out[(size_t) (2 * t)] = f0out[(size_t) t];
-                    coarse[(size_t) (2 * t + 1)] = coarse[(size_t) t];
-                    coarse[(size_t) (2 * t)] = coarse[(size_t) t];
+                    f0out[(size_t) (2 * t)] = fo;     f0out[(size_t) (2 * t + 1)] = fo;
+                    coarseBuf[(size_t) (2 * t)] = coarseOf (fo); coarseBuf[(size_t) (2 * t + 1)] = coarseOf (fo);
+                }
+                else
+                {
+                    f0out[(size_t) t] = fo;
+                    coarseBuf[(size_t) t] = coarseOf (fo);
                 }
             }
 
@@ -662,14 +842,12 @@ private:
                 else if (n.find ("pitch") != std::string::npos && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
                 {
                     feedNames.push_back (gen->io.inNames[i].c_str());
-                    feeds.push_back (mk2D (mi, coarse, sh));
+                    feeds.push_back (mk2D (mi, coarseBuf, sh));
                 }
                 else if (ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
                          && (n.find ("rnd") != std::string::npos || n.find ("noise") != std::string::npos
                              || n.find ("rand") != std::string::npos))
                 {
-                    // noise/seed input (w-okada style exports declare it REQUIRED):
-                    // zeros shaped from the declared dims, dynamic dims resolved to Tfeed
                     feedNames.push_back (gen->io.inNames[i].c_str());
                     std::vector<int64_t> dims;
                     int64_t count = 1;
@@ -688,13 +866,14 @@ private:
                 else if ((n.find ("phone") != std::string::npos || n.find ("hidden") != std::string::npos || n.find ("feat") != std::string::npos)
                          && ty == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
                 {
-                    // slice features to the last T frames, contiguous [T,768]
-                    featBuf.assign (feat + off * kFeatDim, feat + (off + T) * kFeatDim);
+                    // slice the rendered span: rows [ctxL, ctxL+Tr)
+                    const int64_t rows = Tr;
+                    featBuf.assign (feat + (off + ctxL) * kFeatDim,
+                                    feat + (off + ctxL + rows) * kFeatDim);
                     if (fps100_)
                     {
-                        const size_t rows = (size_t) T * kFeatDim;
-                        featBuf.resize (rows * 2);
-                        for (int t = T - 1; t >= 0; --t)
+                        featBuf.resize ((size_t) rows * kFeatDim * 2);
+                        for (int t = Tr - 1; t >= 0; --t)
                         {
                             std::copy_n (featBuf.data() + (size_t) t * kFeatDim, kFeatDim,
                                          featBuf.data() + (size_t) (2 * t + 1) * kFeatDim);
@@ -722,9 +901,7 @@ private:
                 }
                 // unknown inputs ignored -> ORT fills named-only feeds
             }
-            (void) ds2; (void) dsv;
 
-            // pad pitchf for unvoiced-with-zero-hold frames (0 Hz) as 0.0 stays 0.0
             auto outs = gen->ses->Run (Ort::RunOptions { nullptr }, feedNames.data(), feeds.data(),
                                        feeds.size(), gen->io.outPtrs.data(), (size_t) std::min<size_t> (1, gen->io.outPtrs.size()));
             if (outs.empty()) { acc16.erase (acc16.begin(), acc16.begin() + consume16); return; }
@@ -735,44 +912,38 @@ private:
             int64_t M = 1;
             for (auto d : ash) if (d > 1) M = d; // last big dim
             const float* au = outs[0].GetTensorData<float>();
-            std::vector<float> emitted;
+            emitted.clear();
             rsOut.ratio = hostSr / modelSr;
             rsOut.push (au, (int) M, emitted);
             outAcc.insert (outAcc.end(), emitted.begin(), emitted.end());
 
-            // ---- emit (chunkFrames+1) host frames per step, crossfading the head
-            // with the previous tail; outAcc decouples this from resampler rounding
-            const int keep = (kChunkFrames + 1) * opfHost;
-            while ((int) outAcc.size() >= keep)
+            // ---- emit T_r frames per step; the head `over` frames crossfade
+            // linearly with the tail still pending in the output queue (both
+            // render the same input region). Net queue growth per emission is
+            // exactly chunk frames, matching consumption 1:1.
+            while ((int) outAcc.size() >= keepSmp)
             {
-                for (int i = 0; i < tailLen; ++i)
+                const size_t qLen = outQueue.size() - qHead;
+                if (qLen >= (size_t) tailLen)
                 {
-                    const float w = 0.5f - 0.5f * std::cos (kPiF * (float) i / (float) tailLen);
-                    outAcc[(size_t) i] = tail[(size_t) i] * (1.f - w) + outAcc[(size_t) i] * w;
+                    const size_t base = qHead + qLen - (size_t) tailLen;
+                    for (int i = 0; i < tailLen; ++i)
+                    {
+                        const float w = (float) (i + 1) / (float) tailLen;
+                        outQueue[base + (size_t) i] = outQueue[base + (size_t) i] * (1.f - w)
+                                                    + outAcc[(size_t) i] * w;
+                    }
+                    outQueue.insert (outQueue.end(), outAcc.begin() + tailLen, outAcc.begin() + keepSmp);
                 }
-                for (int i = 0; i < tailLen; ++i)
-                    tail[(size_t) i] = outAcc[(size_t) (keep - tailLen + i)];
-
-                // write into delay ring: head frame fuses with the previous tail
-                // slot (crossfade above), so rewind and keep the ring balanced
-                dWrite = dWrite >= (size_t) tailLen ? dWrite - (size_t) tailLen : dWrite;
-                for (int i = 0; i < keep; ++i)
+                else
                 {
-                    delay[dWrite % delayCap] = outAcc[(size_t) i];
-                    ++dWrite;
+                    // startup / after reset: no full tail to blend with
+                    outQueue.insert (outQueue.end(), outAcc.begin(), outAcc.begin() + keepSmp);
                 }
-                outAcc.erase (outAcc.begin(), outAcc.begin() + keep);
+                outAcc.erase (outAcc.begin(), outAcc.begin() + keepSmp);
             }
-
-            // re-align the read cursor after CPU-starve bursts (several steps
-            // in one process() call advance dWrite faster than readPos)
-            const size_t expected = (dWrite + delayCap * 8 - (size_t) L) % delayCap;
-            long diff = (long) (readPos % delayCap) - (long) expected;
-            if (diff > (long) delayCap / 2) diff -= (long) delayCap;
-            if (diff < -(long) delayCap / 2) diff += (long) delayCap;
-            if (std::abs (diff) > 64) readPos = expected;
         }
-        catch (const Ort::Exception&) { /* keep silent, pass zeros */ }
+        catch (const Ort::Exception&) { /* keep silent, pass what we have */ }
 
         acc16.erase (acc16.begin(), acc16.begin() + consume16);
     }
@@ -808,21 +979,30 @@ private:
     std::string lastErr_;
     int threads_ = 2;
     bool fps100_ = false;   // model consumes 100 fps inputs (2x upsampled features/f0)
+    int tExact_ = 0;        // non-zero: export locks the time axis to this feed size
 
+    int quality_ = 1;                       // applied preset
+    std::atomic<int> pendingQuality_ { 1 }; // requested preset
+    std::atomic<bool> pendingReset_ { false };
+    std::mutex geomMtx_;                    // guards geometry + ring vs audio thread
     double hostSr = 48000.0, modelSr = 48000.0;
-    int chunk16 = 960, consume16 = 640, opfHost = 960, tailLen = 960, L = 3840, latency = 2880;
-    size_t delayCap = 7744;
 
+    // geometry (applyGeometry, guarded by geomMtx_)
+    int ctxL = 2, ctxR = 1, chunk = 4, over = 2, tr_ = 6;
+    int winFrames = 9, feed16 = 3200, consume16 = 1280;
+    int opfHost = 960, keepSmp = 5760, tailLen = 1920, latency_ = 7680;
+
+    // buffers (sized for the largest preset in ensureCapacity)
+    std::vector<float> acc16, tmp16, winBuf, featBuf, f0out, pitchfBuf, emitted, outAcc, outQueue;
+    std::vector<int64_t> coarseBuf;   // RVC coarse pitch is int64
+    size_t qHead = 0;
     Resamp rsIn, rsOut;
-    std::vector<float> acc16, delay, tail, outAcc;
-    size_t dWrite = 0;
-    size_t readPos = 0;
     F0Detector f0;
-    float lastF0Hold = 0.f, medianLog = std::log (130.f);
+    F0Cache f0cache;
+    float medianLog = std::log (130.f);
     float semi = 4.f, tHz = 200.f, into = 1.f;
     bool tMode = false;
     int64_t nIn = 0, nOut = 0;
-    std::vector<float> featBuf;
 };
 
 #else // !DYV_NEURAL
@@ -843,10 +1023,13 @@ public:
     double getModelSampleRate() const { return 0; }
     void swapVoice (void*) {}
     bool voiceReady() const { return false; }
+    void requestQuality (int) {}
+    int quality() const { return 0; }
     void prepare (double) {}
     int getLatency() const { return 0; }
     void reset() {}
     void setParams (float, bool, float, float) {}
+    void processBlock (const float* in, float* out, int n) { if (in != out && n > 0) std::copy_n (in, (size_t) n, out); }
     float process (float x) { return x; }
 };
 

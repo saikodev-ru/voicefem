@@ -42,8 +42,10 @@ APVTS::ParameterLayout DyVocalizerProcessor::createLayout()
 
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
     p.push_back (std::make_unique<C> (juce::ParameterID { "engine", 1 }, "Engine",
-                                       juce::StringArray { "DSP (PSOLA)", "Neural (model)" }, 0));
+                                       juce::StringArray { "DSP (PSOLA)", "Neural (model)" }, 1));
     p.push_back (std::make_unique<I> (juce::ParameterID { "voice", 1 }, "Neural Voice", 0, 31, 0));
+    p.push_back (std::make_unique<C> (juce::ParameterID { "quality", 1 }, "Neural Quality",
+                                       juce::StringArray { "Fast (80 ms)", "Smooth (160 ms)", "Max (260 ms)" }, 1));
     p.push_back (std::make_unique<F> (juce::ParameterID { "pitch", 1 }, "Pitch (st)", NR (-12.f, 12.f, 0.01f), 4.5f));
     p.push_back (std::make_unique<F> (juce::ParameterID { "formant", 1 }, "Formant (st)", NR (-6.f, 8.f, 0.01f), 2.5f));
     p.push_back (std::make_unique<C> (juce::ParameterID { "mode", 1 }, "Pitch Mode", juce::StringArray { "Shift", "Target" }, 0));
@@ -293,6 +295,14 @@ void DyVocalizerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         applyLatency();
     }
 
+    const int quality = (int) get ("quality");
+    if (quality != currentQuality)
+    {
+        currentQuality = quality;
+        neural.requestQuality (quality);   // applied inside the next block
+        applyLatency();
+    }
+
     const int engineMode = (int) get ("engine");
     if (engineMode != currentEngine)
     {
@@ -329,21 +339,36 @@ void DyVocalizerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
     const float outGain = std::pow (10.f, P.outDb / 20.f);
     const float wet = juce::jlimit (0.f, 1.f, P.mix);
 
+    // mono downmix (voice = mono)
+    if ((int) monoBuf.size() < numSamples) monoBuf.resize ((size_t) numSamples);
     for (int i = 0; i < numSamples; ++i)
+        monoBuf[(size_t) i] = d1 ? 0.5f * (d0[i] + d1[i]) : d0[i];
+
+    if (useNeuralPath)
     {
-        const float x = d1 ? 0.5f * (d0[i] + d1[i]) : d0[i]; // voice = mono
-        float y;
-        if (useNeuralPath)
+        if (wet < 0.999f)
         {
-            const float n = neural.process (x);
-            y = wet * dyv::softClip (n * outGain) + (1.f - wet) * x;
+            if ((int) dryBuf.size() < numSamples) dryBuf.resize ((size_t) numSamples);
+            std::copy_n (monoBuf.begin(), (size_t) numSamples, dryBuf.begin());
         }
-        else
+        // full-AI path: the whole block goes through the neural engine
+        neural.processBlock (monoBuf.data(), monoBuf.data(), numSamples);
+        for (int i = 0; i < numSamples; ++i)
         {
-            y = engine.process (x);
+            const float x = wet < 0.999f ? dryBuf[(size_t) i] : monoBuf[(size_t) i];
+            const float y = wet * dyv::softClip (monoBuf[(size_t) i] * outGain) + (1.f - wet) * x;
+            d0[i] = y;
+            if (d1) d1[i] = y;
         }
-        d0[i] = y;
-        if (d1) d1[i] = y;
+    }
+    else
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float y = engine.process (monoBuf[(size_t) i]);
+            d0[i] = y;
+            if (d1) d1[i] = y;
+        }
     }
 }
 

@@ -33,9 +33,19 @@ int main (int argc, char** argv)
     check (e.voiceReady(), "engine ready");
 
     e.prepare (48000.0);
+    // latency per quality preset (Fast ~80 ms / Smooth ~160 ms / Max ~260 ms)
+    struct { int q; int lo, hi; const char* name; } qs[] = {
+        { 0, 2400, 5760, "Fast" }, { 1, 4800, 11520, "Smooth" }, { 2, 9600, 19200, "Max" },
+    };
+    for (auto& qq : qs)
+    {
+        e.requestQuality (qq.q);
+        const int lat = e.getLatency();
+        snprintf (buf, sizeof (buf), "%s: latency=%d samples (%.1f ms)", qq.name, lat, lat / 48.0);
+        check (lat > qq.lo && lat < qq.hi, "latency matches preset", buf);
+    }
+    e.requestQuality (1);   // back to default for the streaming checks
     const int lat = e.getLatency();
-    snprintf (buf, sizeof (buf), "latency=%d samples (%.1f ms)", lat, lat / 48.0);
-    check (lat > 2000 && lat < 4500, "latency in sane 40-95 ms range", buf);
 
     // feed a synthetic voiced-ish signal for 6 s, sample by sample
     const int N = 48000 * 6;
