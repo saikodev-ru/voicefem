@@ -5,14 +5,27 @@ on:
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   probe-and-convert:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RELEASE_ID: "422092708" # models-v1
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip if already published
+        id: done
+        run: |
+          NAME=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if any(a['name']=='voice_HuTao.onnx' for a in d.get('assets',[])) else 'no')")
+          echo "published=$NAME" >> "$GITHUB_OUTPUT"
+
       - name: Probe storage node availability
+        if: steps.done.outputs.published == 'no'
         id: probe
         run: |
           ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('https://disk.yandex.ru/d/N1Dasj6Tn7SLRQ', safe=''))")
@@ -27,17 +40,17 @@ jobs:
           fi
 
       - name: Set up Python 3.11
-        if: steps.probe.outputs.reachable == 'true'
+        if: steps.done.outputs.published == 'no' && steps.probe.outputs.reachable == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install deps
-        if: steps.probe.outputs.reachable == 'true'
+        if: steps.done.outputs.published == 'no' && steps.probe.outputs.reachable == 'true'
         run: pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install onnx onnxruntime numpy
 
       - name: Download and convert
-        if: steps.probe.outputs.reachable == 'true'
+        if: steps.done.outputs.published == 'no' && steps.probe.outputs.reachable == 'true'
         run: |
           ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('https://disk.yandex.ru/d/N1Dasj6Tn7SLRQ', safe=''))")
           HREF=$(curl -s "https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key=$ENC" | python3 -c "import json,sys; print(json.load(sys.stdin)['href'])")
@@ -48,9 +61,21 @@ jobs:
           ls -la outdir/
 
       - name: Upload ONNX artifact
-        if: steps.probe.outputs.reachable == 'true'
+        if: steps.done.outputs.published == 'no' && steps.probe.outputs.reachable == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: voice-HuTao
           path: outdir/voice_HuTao.onnx
           if-no-files-found: error
+
+      - name: Attach to models-v1 release
+        if: steps.done.outputs.published == 'no' && steps.probe.outputs.reachable == 'true'
+        run: |
+          SIZE=$(stat -c%s outdir/voice_HuTao.onnx)
+          UP=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID" | \
+            python3 -c "import json,sys; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
+          curl -s -X POST "$UP?name=voice_HuTao.onnx" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @outdir/voice_HuTao.onnx | python3 -c "import json,sys; d=json.load(sys.stdin); print('attached:', d.get('name'), d.get('state'), d.get('size'))"
+          echo "voice_HuTao.onnx ($SIZE bytes) attached to models-v1"
