@@ -3,12 +3,12 @@
 #include "PluginProcessor.h"
 #include "Fl11LookAndFeel.h"
 
-class VoiceFemEditor : public juce::AudioProcessorEditor,
+class DyVocalizerEditor : public juce::AudioProcessorEditor,
                        public juce::FileDragAndDropTarget
 {
 public:
-    explicit VoiceFemEditor (VoiceFemProcessor&);
-    ~VoiceFemEditor() override;
+    explicit DyVocalizerEditor (DyVocalizerProcessor&);
+    ~DyVocalizerEditor() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -47,7 +47,7 @@ private:
     Knob* knobFor (const char* paramId);
 
     Fl11LookAndFeel fl11;
-    VoiceFemProcessor& proc;
+    DyVocalizerProcessor& proc;
     juce::TooltipWindow tooltips { this, 600 };
     juce::ComboBox presetBox;
     juce::ComboBox voiceBox;
@@ -61,5 +61,5 @@ private:
     juce::Rectangle<int> headerRect, panelRects[3];
     static constexpr const char* kPanelTitles[3] = { "PITCH & TIMBRE", "CHARACTER", "CLEAN-UP & OUTPUT" };
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceFemEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DyVocalizerEditor)
 };

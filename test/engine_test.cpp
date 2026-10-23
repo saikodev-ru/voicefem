@@ -1,11 +1,11 @@
-// engine_test.cpp — offline validation suite for VoiceFemEngine (no JUCE needed).
+// engine_test.cpp — offline validation suite for DyVocalizerEngine (no JUCE needed).
 // Build: g++ -O2 -std=c++17 test/engine_test.cpp -o t && ./t   (exit code 0 = all pass)
-#include "../Source/VoiceFemEngine.h"
+#include "../Source/DyVocalizerEngine.h"
 #include <cstdio>
 #include <chrono>
 #include <random>
 #include <cstring>
-using namespace vfem;
+using namespace dyv;
 
 static int failures = 0;
 

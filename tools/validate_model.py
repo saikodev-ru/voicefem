@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate that ONNX models are compatible with VoiceFem's neural engine.
+"""Validate that ONNX models are compatible with DyVocalizer's neural engine.
 
 Usage:  python3 validate_model.py <models_folder>
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Convert an RVC .pth voice model into a VoiceFem-compatible ONNX generator.
+"""Convert an RVC .pth voice model into a DyVocalizer-compatible ONNX generator.
 
 Usage:
     python pth_to_onnx.py <model.pth> [--out <models_dir>] [--rvc-dir <RVC checkout>]
 
-Output: <models_dir>/voice_<name>.onnx   (default models_dir = %APPDATA%/VoiceFem/models)
+Output: <models_dir>/voice_<name>.onnx   (default models_dir = %APPDATA%/DyVocalizer/models)
 
 Inputs of the exported graph (what NeuralVC.h feeds):
     phone         float [1,T,768]
@@ -19,7 +19,7 @@ inside the graph, so the plugin does not need to supply it.
 
 Requirements: pip install torch onnx onnxruntime numpy
 RVC code: git clone --depth 1 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
-          (auto-cloned to %APPDATA%/VoiceFem/rvc if git is installed; or pass --rvc-dir)
+          (auto-cloned to %APPDATA%/DyVocalizer/rvc if git is installed; or pass --rvc-dir)
 Only v2 models (768-dim content features) match the bundled content.onnx;
 v1 models (256-dim) are rejected with a clear message.
 """
@@ -32,8 +32,8 @@ from pathlib import Path
 def default_models_dir() -> Path:
     appdata = os.environ.get("APPDATA")
     if appdata:
-        return Path(appdata) / "VoiceFem" / "models"
-    return Path.home() / ".voicefem" / "models"
+        return Path(appdata) / "DyVocalizer" / "models"
+    return Path.home() / ".dyvocalizer" / "models"
 
 
 def main() -> int:
@@ -69,11 +69,11 @@ def main() -> int:
         return 3
     version = cpt.get("version", "v1")
     if version != "v2":
-        print("ERROR: model is RVC v1 (256-dim features). VoiceFem's content encoder "
+        print("ERROR: model is RVC v1 (256-dim features). DyVocalizer's content encoder "
               "is 768-dim, so only v2 models are supported.")
         return 4
     if cpt.get("f0", 1) != 1:
-        print("ERROR: model was trained without pitch (f0=0); VoiceFem needs f0 models.")
+        print("ERROR: model was trained without pitch (f0=0); DyVocalizer needs f0 models.")
         return 5
 
     cpt["config"][-3] = cpt["weight"]["emb_g.weight"].shape[0]

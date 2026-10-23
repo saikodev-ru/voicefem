@@ -1,14 +1,14 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
-#include "VoiceFemEngine.h"
+#include "DyVocalizerEngine.h"
 #include "NeuralVC.h"
 
-class VoiceFemProcessor : public juce::AudioProcessor,
+class DyVocalizerProcessor : public juce::AudioProcessor,
                           private juce::Timer
 {
 public:
-    VoiceFemProcessor();
-    ~VoiceFemProcessor() override;
+    DyVocalizerProcessor();
+    ~DyVocalizerProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -18,7 +18,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "VoiceFem"; }
+    const juce::String getName() const override { return "DyVocalizer"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
@@ -51,7 +51,7 @@ private:
     static float rangeHz (int choice);
     void applyLatency();
 
-    vfem::Engine engine;
+    dyv::Engine engine;
     nvf::NeuralEngine neural;
 
     double currentSampleRate = 48000.0;
@@ -72,5 +72,5 @@ private:
     std::atomic<bool> rescanRequested { false };
     juce::ThreadPool importPool { 1 };
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceFemProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DyVocalizerProcessor)
 };
