@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <BinaryData.h>
 
 namespace
 {
@@ -92,6 +93,76 @@ VoiceFemProcessor::VoiceFemProcessor()
     startTimerHz (4); // model loading / status refresh (message thread)
 }
 
+VoiceFemProcessor::~VoiceFemProcessor()
+{
+    shuttingDown = true;
+    importPool.removeAllJobs (true, 15000);
+}
+
+juce::String VoiceFemProcessor::getImportStatus() const
+{
+    const juce::ScopedLock sl (importLock);
+    return importStatus;
+}
+
+void VoiceFemProcessor::rescanModels() { rescanRequested = true; }
+
+void VoiceFemProcessor::importModel (const juce::File& file)
+{
+    auto setStatus = [this] (const juce::String& t) { const juce::ScopedLock sl (importLock); importStatus = t; };
+    const auto ext = file.getFileExtension().toLowerCase();
+    const auto dir = modelsDir();
+    dir.createDirectory();
+
+    if (ext == ".onnx")
+    {
+        auto name = file.getFileName();
+        if (! name.startsWithIgnoreCase ("voice_") && name.equalsIgnoreCase ("content.onnx") == false)
+            name = "voice_" + name;
+        setStatus (file.copyFileTo (dir.getChildFile (name)) ? "imported: " + name : "import failed");
+        rescanRequested = true;
+        return;
+    }
+    if (ext != ".pth") { setStatus ("unsupported file (use .pth or .onnx)"); return; }
+
+    setStatus ("converting " + file.getFileName() + " ...");
+    importPool.addJob ([this, file, dir, setStatus]
+    {
+        const auto toolDir = dir.getParentDirectory().getChildFile ("tools");
+        toolDir.createDirectory();
+        const auto script = toolDir.getChildFile ("pth_to_onnx.py");
+        script.replaceWithData (BinaryData::pth_to_onnx_py, (size_t) BinaryData::pth_to_onnx_pySize);
+
+        const juce::StringArray pythons { "python", "py -3", "python3" };
+        for (auto& py : pythons)
+        {
+            juce::ChildProcess proc;
+            const auto cmd = py + " \"" + script.getFullPathName() + "\" \"" + file.getFullPathName()
+                           + "\" --out \"" + dir.getFullPathName() + "\"";
+            if (! proc.start (cmd, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+                continue;
+            while (proc.isRunning())
+            {
+                if (shuttingDown.load()) { proc.kill(); return; }
+                juce::Thread::sleep (200);
+            }
+            const auto out = proc.readAllProcessOutput().trim();
+            const auto last = out.fromLastOccurrenceOf ("\n", false, false).trim();
+            if (proc.getExitCode() == 0)
+            {
+                setStatus ("converted: " + file.getFileNameWithoutExtension());
+                rescanRequested = true;
+            }
+            else if (out.containsIgnoreCase ("No module named") || out.containsIgnoreCase ("is not recognized"))
+                continue; // try next python launcher
+            else
+                setStatus (last.isEmpty() ? "conversion failed" : last.substring (0, 90));
+            return;
+        }
+        setStatus ("need Python + torch/onnx (pip install torch onnx)");
+    });
+}
+
 bool VoiceFemProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 {
     const auto in = l.getMainInputChannelSet(), out = l.getMainOutputChannelSet();
@@ -117,6 +188,11 @@ void VoiceFemProcessor::prepareToPlay (double sampleRate, int)
 void VoiceFemProcessor::timerCallback()
 {
 #if VFEM_NEURAL
+    if (rescanRequested.exchange (false))
+    {
+        voiceNames.clear(); voicePaths.clear(); loadedVoice = -1; neuralState = 0;
+    }
+
     // load the model folder once
     if (voiceNames.isEmpty() && neuralState.load() == 0)
     {
