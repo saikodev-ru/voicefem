@@ -171,9 +171,23 @@ struct SessionHolder
     ModelIO io;
 };
 
+// UTF-8 std::string -> native std::filesystem::path.
+// On Windows Ort::Session and ifstream expect wchar_t paths (ORTCHAR_T ==
+// wchar_t), and %APPDATA% folders are routinely non-ASCII, so go through
+// u8path() for a correct UTF-8 -> UTF-16 conversion. On POSIX char paths are
+// native and pass straight through.
+static std::filesystem::path nativePath (const std::string& p)
+{
+#if defined(_WIN32)
+    return std::filesystem::u8path (p);
+#else
+    return std::filesystem::path (p);
+#endif
+}
+
 static bool readFileOk (const std::string& p)
 {
-    std::ifstream f (p, std::ios::binary);
+    std::ifstream f (nativePath (p), std::ios::binary);
     return f.good() && f.seekg (0, std::ios::end).tellg() > 0;
 }
 
@@ -214,7 +228,7 @@ static std::unique_ptr<SessionHolder> openSession (const std::string& path, int 
     so.SetExecutionMode (ORT_SEQUENTIAL);
     so.SetIntraOpNumThreads (std::max (1, threads));
     so.SetInterOpNumThreads (1);
-    try { h->ses = std::make_unique<Ort::Session> (*h->env, path.c_str(), so); }
+    try { h->ses = std::make_unique<Ort::Session> (*h->env, nativePath (path).c_str(), so); }
     catch (...) { return nullptr; }
     fillModelIO (*h->ses, h->io);
     return h;
