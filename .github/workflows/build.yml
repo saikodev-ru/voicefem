@@ -3,6 +3,11 @@ name: Build VST3 (Windows)
 on:
   push:
   workflow_dispatch:
+    inputs:
+      neural:
+        description: 'Build with the neural engine (uncheck = DSP-only diagnostic build)'
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -35,7 +40,12 @@ jobs:
           cmake --version
 
       - name: Configure
-        run: cmake -B build -S . -G "Visual Studio 18 2026" -A x64
+        shell: pwsh
+        run: |
+          $neural = "ON"
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and "${{ inputs.neural }}" -eq "false") { $neural = "OFF" }
+          Write-Host "VFEM_NEURAL=$neural"
+          cmake -B build -S . -G "Visual Studio 18 2026" -A x64 -DVFEM_NEURAL=$neural
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -46,13 +56,19 @@ jobs:
           $bundle = "build/VoiceFem_artefacts/Release/VST3/VoiceFem.vst3"
           if (!(Test-Path $bundle)) { Write-Error "VST3 bundle not found"; exit 1 }
           Get-ChildItem -Recurse $bundle | ForEach-Object { Write-Host "$($_.Length) bytes  $($_.FullName)" }
+          $dspOnly = ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and "${{ inputs.neural }}" -eq "false")
           $ort = Join-Path $bundle "Contents/x86_64-win/onnxruntime.dll"
-          if (!(Test-Path $ort)) { Write-Error "onnxruntime.dll is missing from the bundle - hosts will fail to load the plugin"; exit 1 }
-          Write-Host "OK: onnxruntime.dll bundled ($((Get-Item $ort).Length) bytes)"
+          if ($dspOnly) {
+            if (Test-Path $ort) { Write-Error "DSP-only build must not contain onnxruntime.dll"; exit 1 }
+            Write-Host "OK: DSP-only bundle verified (no ORT dependency)"
+          } else {
+            if (!(Test-Path $ort)) { Write-Error "onnxruntime.dll is missing from the bundle - hosts will fail to load the plugin"; exit 1 }
+            Write-Host "OK: onnxruntime.dll bundled ($((Get-Item $ort).Length) bytes)"
+          }
 
       - name: Upload VST3 plugin
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceFem-VST3
+          name: VoiceFem-VST3${{ github.event_name == 'workflow_dispatch' && inputs.neural == false && '-DSPonly' || '' }}
           path: build/VoiceFem_artefacts/Release/VST3/
           if-no-files-found: error
