@@ -1,8 +1,10 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "VoiceFemEngine.h"
+#include "NeuralVC.h"
 
-class VoiceFemProcessor : public juce::AudioProcessor
+class VoiceFemProcessor : public juce::AudioProcessor,
+                          private juce::Timer
 {
 public:
     VoiceFemProcessor();
@@ -32,12 +34,32 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // neural engine introspection for the editor (message thread only)
+    juce::StringArray getVoiceNames() const { return voiceNames; }
+    juce::String neuralStatus() const;
+    static juce::File modelsDir();
+
+    void timerCallback();
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     static float rangeHz (int choice);
+    void applyLatency();
 
     vfem::Engine engine;
+    nvf::NeuralEngine neural;
+
     double currentSampleRate = 48000.0;
     int currentRange = -1;
+    int currentEngine = 0;
     int currentProgram = 0;
+
+    // neural loading state (touched on message thread + atomics for audio thread)
+    std::atomic<int> neuralState { 0 };   // 0 = no models, 1 = ready, -1 = failed
+    std::atomic<bool> contentLoaded { false };
+    int loadedVoice = -1;
+    juce::StringArray voiceNames;
+    std::vector<std::string> voicePaths;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceFemProcessor)
 };

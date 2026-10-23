@@ -11,6 +11,9 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    void refreshVoiceList (const juce::StringArray& names);
+    void updateNeuralStatus (const juce::String& status);
+
 private:
     struct Knob
     {
@@ -31,6 +34,9 @@ private:
     VoiceFemProcessor& proc;
     juce::ComboBox presetBox;
     juce::Label presetLabel;
+    juce::ComboBox voiceBox;
+    juce::Label voiceLabel;
+    juce::Label statusLabel;
     std::vector<std::unique_ptr<Knob>> knobs;
     std::vector<std::unique_ptr<Choice>> choices;
 

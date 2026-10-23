@@ -1,2 +1,5 @@
 build/
 test/t
+test/*.exe
+tools/*.onnx
+build.log

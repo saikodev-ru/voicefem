@@ -12,6 +12,27 @@ VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p
     presetBox.onChange = [this] { proc.setCurrentProgram (presetBox.getSelectedId() - 1); };
     addAndMakeVisible (presetBox);
 
+    addChoice ("engine", "Engine");
+    addChoice ("mode", "Pitch Mode");
+    addChoice ("range", "Voice Range");
+
+    voiceLabel.setText ("Neural Voice", juce::dontSendNotification);
+    voiceLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (voiceLabel);
+    voiceBox.addItem ("(no models in %APPDATA%\\VoiceFem\\models)", 1);
+    voiceBox.setEnabled (false);
+    voiceBox.onChange = [this]
+    {
+        if (auto* prm = dynamic_cast<juce::AudioParameterInt*> (proc.apvts.getParameter ("voice")))
+            prm->setValueNotifyingHost (prm->convertTo0to1 (voiceBox.getSelectedId() - 1));
+    };
+    addAndMakeVisible (voiceBox);
+
+    statusLabel.setText ("", juce::dontSendNotification);
+    statusLabel.setJustificationType (juce::Justification::centredRight);
+    statusLabel.setColour (juce::Label::textColourId, juce::Colour (0xff9d94ab));
+    addAndMakeVisible (statusLabel);
+
     addKnob ("pitch", "Pitch");
     addKnob ("formant", "Formant");
     addKnob ("target", "Target Hz");
@@ -25,10 +46,7 @@ VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p
     addKnob ("mix", "Mix");
     addKnob ("gain", "Output");
 
-    addChoice ("mode", "Pitch Mode");
-    addChoice ("range", "Voice Range");
-
-    setSize (760, 470);
+    setSize (760, 500);
 }
 
 void VoiceFemEditor::addKnob (const char* id, const char* text)
@@ -57,6 +75,27 @@ void VoiceFemEditor::addChoice (const char* id, const char* text)
     choices.push_back (std::move (c));
 }
 
+void VoiceFemEditor::refreshVoiceList (const juce::StringArray& names)
+{
+    voiceBox.clear (juce::dontSendNotification);
+    if (names.isEmpty())
+    {
+        voiceBox.addItem ("(no models in %APPDATA%\\VoiceFem\\models)", 1);
+        voiceBox.setSelectedId (1, juce::dontSendNotification);
+        voiceBox.setEnabled (false);
+        return;
+    }
+    for (int i = 0; i < names.size(); ++i)
+        voiceBox.addItem (names[i], i + 1);
+    voiceBox.setSelectedId (0, juce::dontSendNotification);
+    voiceBox.setEnabled (true);
+}
+
+void VoiceFemEditor::updateNeuralStatus (const juce::String& status)
+{
+    if (statusLabel.getText() != status) statusLabel.setText (status, juce::dontSendNotification);
+}
+
 void VoiceFemEditor::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff1c1a24));
@@ -76,18 +115,23 @@ void VoiceFemEditor::resized()
     presetBox.setBounds (top.removeFromRight (260));
     presetLabel.setBounds (top.removeFromRight (70));
 
-    area.removeFromTop (8);
+    area.removeFromTop (6);
     auto selRow = area.removeFromTop (30);
-    if (choices.size() == 2)
+    const int third = selRow.getWidth() / 3;
+    for (int i = 0; i < (int) choices.size() && i < 3; ++i)
     {
-        auto a = selRow.removeFromLeft (selRow.getWidth() / 2);
-        choices[0]->label.setBounds (a.removeFromLeft (90));
-        choices[0]->box.setBounds (a.reduced (6, 0).removeFromLeft (160));
-        choices[1]->label.setBounds (selRow.removeFromLeft (110));
-        choices[1]->box.setBounds (selRow.reduced (6, 0).removeFromLeft (190));
+        auto cell = selRow.removeFromLeft (third);
+        choices[i]->label.setBounds (cell.removeFromLeft (86));
+        choices[i]->box.setBounds (cell.reduced (4, 0).removeFromLeft (third - 96));
     }
 
-    area.removeFromTop (8);
+    area.removeFromTop (6);
+    auto voiceRow = area.removeFromTop (30);
+    statusLabel.setBounds (voiceRow.removeFromRight (200));
+    voiceLabel.setBounds (voiceRow.removeFromLeft (86));
+    voiceBox.setBounds (voiceRow.reduced (4, 0).removeFromLeft (200));
+
+    area.removeFromTop (6);
     const int cols = 4, rows = 3;
     const int cw = area.getWidth() / cols, ch = area.getHeight() / rows;
     for (size_t i = 0; i < knobs.size(); ++i)

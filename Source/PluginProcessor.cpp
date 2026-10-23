@@ -36,9 +36,13 @@ APVTS::ParameterLayout VoiceFemProcessor::createLayout()
 {
     using F = juce::AudioParameterFloat;
     using C = juce::AudioParameterChoice;
+    using I = juce::AudioParameterInt;
     using NR = juce::NormalisableRange<float>;
 
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
+    p.push_back (std::make_unique<C> (juce::ParameterID { "engine", 1 }, "Engine",
+                                       juce::StringArray { "DSP (PSOLA)", "Neural (model)" }, 0));
+    p.push_back (std::make_unique<I> (juce::ParameterID { "voice", 1 }, "Neural Voice", 0, 31, 0));
     p.push_back (std::make_unique<F> (juce::ParameterID { "pitch", 1 }, "Pitch (st)", NR (-12.f, 12.f, 0.01f), 4.5f));
     p.push_back (std::make_unique<F> (juce::ParameterID { "formant", 1 }, "Formant (st)", NR (-6.f, 8.f, 0.01f), 2.5f));
     p.push_back (std::make_unique<C> (juce::ParameterID { "mode", 1 }, "Pitch Mode", juce::StringArray { "Shift", "Target" }, 0));
@@ -62,12 +66,30 @@ float VoiceFemProcessor::rangeHz (int choice)
     return choice == 0 ? 65.f : (choice == 2 ? 100.f : 80.f);
 }
 
+juce::File VoiceFemProcessor::modelsDir()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+        .getChildFile ("VoiceFem").getChildFile ("models");
+}
+
+juce::String VoiceFemProcessor::neuralStatus() const
+{
+    switch (neuralState.load())
+    {
+        case 1:  return loadedVoice >= 0 && loadedVoice < voiceNames.size()
+                       ? "ready: " + voiceNames[loadedVoice] : "ready";
+        case -1: return "no models found";
+        default: return contentLoaded.load() ? "loading voice..." : "loading...";
+    }
+}
+
 VoiceFemProcessor::VoiceFemProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "VOICEFEM", createLayout())
 {
+    startTimerHz (4); // model loading / status refresh (message thread)
 }
 
 bool VoiceFemProcessor::isBusesLayoutSupported (const BusesLayout& l) const
@@ -77,12 +99,78 @@ bool VoiceFemProcessor::isBusesLayoutSupported (const BusesLayout& l) const
     return in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo();
 }
 
+void VoiceFemProcessor::applyLatency()
+{
+    const bool neuralActive = currentEngine == 1 && neuralState.load() == 1;
+    setLatencySamples (neuralActive ? neural.getLatency() : engine.getLatency());
+}
+
 void VoiceFemProcessor::prepareToPlay (double sampleRate, int)
 {
     currentSampleRate = sampleRate;
     currentRange = (int) apvts.getRawParameterValue ("range")->load();
     engine.prepare (sampleRate, rangeHz (currentRange));
-    setLatencySamples (engine.getLatency());
+    neural.prepare (sampleRate);
+    applyLatency();
+}
+
+void VoiceFemProcessor::timerCallback()
+{
+#if VFEM_NEURAL
+    // load the model folder once
+    if (voiceNames.isEmpty() && neuralState.load() == 0)
+    {
+        const auto dir = modelsDir();
+        auto list = nvf::NeuralEngine::scanVoices (dir.getFullPathName().toStdString());
+        if (list.empty())
+        {
+            neuralState = -1;
+        }
+        else
+        {
+            for (auto& v : list) { voiceNames.add (juce::String (v.name)); voicePaths.push_back (v.path); }
+            // voice param range stays 0..31; out-of-range values are clamped on use
+            if (juce::AudioProcessorEditor* ed = getActiveEditor())
+                if (auto* e = dynamic_cast<VoiceFemEditor*> (ed))
+                    e->refreshVoiceList (voiceNames);
+        }
+    }
+
+    // (re)load the selected voice if needed
+    if (! voicePaths.empty())
+    {
+        const int want = (int) apvts.getRawParameterValue ("voice")->load();
+        const int clamped = juce::jlimit (0, (int) voicePaths.size() - 1, want);
+        if (! contentLoaded.load())
+        {
+            const auto cdir = modelsDir();
+            const auto cpath = cdir.getChildFile ("content.onnx").getFullPathName().toStdString();
+            if (neural.loadContent (cpath, std::max (1, (int) juce::SystemStats::getNumCpus() / 2)))
+                contentLoaded = true;
+            else
+                neuralState = -1;
+        }
+        if (contentLoaded.load() && (neuralState.load() != 1 || clamped != loadedVoice))
+        {
+            const double sr = neural.loadVoice (voicePaths[(size_t) clamped]);
+            if (sr > 0)
+            {
+                loadedVoice = clamped;
+                neuralState = 1;
+                neural.reset();
+                applyLatency();
+            }
+            else
+            {
+                neuralState = -1;
+            }
+        }
+    }
+
+    if (auto* ed = getActiveEditor())
+        if (auto* e = dynamic_cast<VoiceFemEditor*> (ed))
+            e->updateNeuralStatus (neuralStatus());
+#endif
 }
 
 void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -100,7 +188,14 @@ void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         currentRange = range;
         engine.prepare (currentSampleRate, rangeHz (range));
-        setLatencySamples (engine.getLatency());
+        applyLatency();
+    }
+
+    const int engineMode = (int) get ("engine");
+    if (engineMode != currentEngine)
+    {
+        currentEngine = engineMode;
+        applyLatency();
     }
 
     vfem::Params P;
@@ -119,16 +214,32 @@ void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     P.deEss = get ("deess");
     engine.setParams (P);
 
+    const bool useNeuralPath = currentEngine == 1 && neuralState.load() == 1;
+    if (useNeuralPath)
+        neural.setParams (P.pitchSemis, P.targetMode, P.targetHz, P.intonation);
+
     const int chans = juce::jmin (numIn, numOut);
     if (chans <= 0) return;
 
     auto* d0 = buffer.getWritePointer (0);
     auto* d1 = chans > 1 ? buffer.getWritePointer (1) : nullptr;
 
+    const float outGain = std::pow (10.f, P.outDb / 20.f);
+    const float wet = juce::jlimit (0.f, 1.f, P.mix);
+
     for (int i = 0; i < numSamples; ++i)
     {
         const float x = d1 ? 0.5f * (d0[i] + d1[i]) : d0[i]; // voice = mono
-        const float y = engine.process (x);
+        float y;
+        if (useNeuralPath)
+        {
+            const float n = neural.process (x);
+            y = wet * vfem::softClip (n * outGain) + (1.f - wet) * x;
+        }
+        else
+        {
+            y = engine.process (x);
+        }
         d0[i] = y;
         if (d1) d1[i] = y;
     }
