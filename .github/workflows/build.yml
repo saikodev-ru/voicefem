@@ -40,6 +40,16 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      - name: Verify VST3 bundle
+        shell: pwsh
+        run: |
+          $bundle = "build/VoiceFem_artefacts/Release/VST3/VoiceFem.vst3"
+          if (!(Test-Path $bundle)) { Write-Error "VST3 bundle not found"; exit 1 }
+          Get-ChildItem -Recurse $bundle | ForEach-Object { Write-Host "$($_.Length) bytes  $($_.FullName)" }
+          $ort = Join-Path $bundle "Contents/x86_64-win/onnxruntime.dll"
+          if (!(Test-Path $ort)) { Write-Error "onnxruntime.dll is missing from the bundle - hosts will fail to load the plugin"; exit 1 }
+          Write-Host "OK: onnxruntime.dll bundled ($((Get-Item $ort).Length) bytes)"
+
       - name: Upload VST3 plugin
         uses: actions/upload-artifact@v4
         with:
