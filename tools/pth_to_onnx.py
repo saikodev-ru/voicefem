@@ -254,9 +254,6 @@ def main():
                 print(f"  T={T}: OK audio={out.shape}")
             except Exception as e:
                 print(f"  T={T}: (locked, expected for non-trace T) {str(e)[:50]}")
-        with torch.no_grad():
-            if f0:
-                net_out = None  # M-class forward used inside export; compare via ORT only
         out = ref.run(None, feeds)[0].astype(np.float32)
         print(f"test: rms={float(np.sqrt((out ** 2).mean())):.4f} "
               f"(sanity: > 0.005 expected for random features)")
