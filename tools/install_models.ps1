@@ -1,6 +1,7 @@
-# Installs ready-to-use neural voice models for VoiceFem.
-# Creates %APPDATA%\VoiceFem\models and downloads:
+# Installs ready-to-use neural voice models for DyVocalizer.
+# Creates %APPDATA%\DyVocalizer\models and downloads:
 #   content.onnx       - ContentVec-768 content encoder (vec-768-layer-12)
+#   voice_HuTao.onnx   - BASE voice (RVC v2 48k, bundled with the project)
 #   voice_woman1.onnx  - RVC v2 40k female voice (w-okada realtime convention)
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File tools\install_models.ps1
@@ -9,14 +10,16 @@
 
 $ErrorActionPreference = "Stop"
 
-$dst = Join-Path $env:APPDATA "VoiceFem\models"
+$dst = Join-Path $env:APPDATA "DyVocalizer\models"
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 Write-Host "Model folder: $dst"
 
+$base = "https://github.com/saikodev-ru/voicefem/releases/download/models-v1"
 $files = @(
-    @{ Name = "content.onnx";      Url = "https://huggingface.co/ozada/onnx_rvc/resolve/main/vec-768-layer-12.onnx"; MinMB = 300 },
-    @{ Name = "voice_woman1.onnx"; Url = "https://huggingface.co/ozada/onnx_rvc/resolve/main/woman_1.onnx";          MinMB = 90 },
-    @{ Name = "voice_woman2.onnx"; Url = "https://huggingface.co/ozada/onnx_rvc/resolve/main/woman_2.onnx";          MinMB = 90 }
+    @{ Name = "content.onnx";     Url = "https://huggingface.co/ozada/onnx_rvc/resolve/main/vec-768-layer-12.onnx"; MinMB = 300 },
+    @{ Name = "voice_HuTao.onnx"; Url = "$base/voice_HuTao.onnx";                                                   MinMB = 90 },
+    @{ Name = "voice_woman1.onnx"; Url = "https://huggingface.co/ozada/onnx_rvc/resolve/main/woman_1.onnx";         MinMB = 90 },
+    @{ Name = "voice_woman2.onnx"; Url = "https://huggingface.co/ozada/onnx_rvc/resolve/main/woman_2.onnx";         MinMB = 90 }
 )
 
 foreach ($f in $files) {
@@ -36,5 +39,5 @@ foreach ($f in $files) {
 
 Write-Host ""
 Write-Host "Done. Open the plugin and select Engine = 'Neural (model)'."
-Write-Host "Your own RVC .pth voices: convert with  python tools\pth_to_onnx.py voice.pth voice_xxx.onnx"
-Write-Host "then copy the .onnx into $dst"
+Write-Host "Your own RVC .pth voices: drag the .pth onto the plugin window (or use Import model...),"
+Write-Host "or convert manually:  python tools\pth_to_onnx.py voice.pth voice_xxx.onnx"

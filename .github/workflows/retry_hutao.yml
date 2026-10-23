@@ -1,0 +1,56 @@
+name: Retry HuTao conversion (Yandex node down)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  probe-and-convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe storage node availability
+        id: probe
+        run: |
+          ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('https://disk.yandex.ru/d/N1Dasj6Tn7SLRQ', safe=''))")
+          HREF=$(curl -s --max-time 30 "https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key=$ENC" | python3 -c "import json,sys; print(json.load(sys.stdin).get('href',''))")
+          STORE=$(curl -s -o /dev/null --max-time 15 -w "%{redirect_url}" "$HREF")
+          HOST=$(python3 -c "import urllib.parse,sys; print(urllib.parse.urlparse('$STORE').netloc)")
+          echo "storage host: $HOST"
+          if curl -s -o /dev/null --max-time 15 -r 0-1023 "$STORE"; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python 3.11
+        if: steps.probe.outputs.reachable == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        if: steps.probe.outputs.reachable == 'true'
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install onnx onnxruntime numpy
+
+      - name: Download and convert
+        if: steps.probe.outputs.reachable == 'true'
+        run: |
+          ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('https://disk.yandex.ru/d/N1Dasj6Tn7SLRQ', safe=''))")
+          HREF=$(curl -s "https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key=$ENC" | python3 -c "import json,sys; print(json.load(sys.stdin)['href'])")
+          curl -L --fail --retry 5 --retry-delay 10 --max-time 900 -o model.pth "$HREF"
+          ls -la model.pth
+          python tools/pth_to_onnx.py model.pth --out outdir --test
+          mv outdir/voice_model.onnx outdir/voice_HuTao.onnx
+          ls -la outdir/
+
+      - name: Upload ONNX artifact
+        if: steps.probe.outputs.reachable == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-HuTao
+          path: outdir/voice_HuTao.onnx
+          if-no-files-found: error
