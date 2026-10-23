@@ -82,6 +82,10 @@ target_sources(VoiceFem PRIVATE
     Source/VoiceFemEngine.h
     Source/NeuralVC.h)
 
+if (VFEM_NEURAL)
+    target_sources(VoiceFem PRIVATE Source/OrtDelayLoad.cpp)
+endif()
+
 target_compile_definitions(VoiceFem PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
@@ -107,11 +111,33 @@ if (VFEM_NEURAL)
             IMPORTED_LOCATION "${VFEM_ORT_DIR}/lib/onnxruntime.dll"
             IMPORTED_IMPLIB "${VFEM_ORT_DIR}/lib/onnxruntime.lib")
         target_link_libraries(VoiceFem PRIVATE ort)
-        # place onnxruntime.dll inside the .vst3 bundle next to the plugin dll
-        add_custom_command(TARGET VoiceFem POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${VFEM_ORT_DIR}/lib/onnxruntime.dll"
-                "$<TARGET_FILE_DIR:VoiceFem>/onnxruntime.dll")
+
+        # place onnxruntime.dll inside the .vst3 bundle, next to the plugin dll.
+        # NOTE: must be attached to the real VST3 target (VoiceFem_VST3);
+        # 'VoiceFem' is JUCE's shared-code static lib and its TARGET_FILE_DIR
+        # is NOT the bundle (that bug left the bundle without the ORT dll, so
+        # hosts failed to load the plugin at all).
+        if (TARGET VoiceFem_VST3)
+            add_custom_command(TARGET VoiceFem_VST3 POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${VFEM_ORT_DIR}/lib/onnxruntime.dll"
+                    "$<TARGET_FILE_DIR:VoiceFem_VST3>/onnxruntime.dll")
+        else()
+            add_custom_command(TARGET VoiceFem POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${VFEM_ORT_DIR}/lib/onnxruntime.dll"
+                    "$<TARGET_FILE_DIR:VoiceFem>/onnxruntime.dll")
+        endif()
+
+        # delay-load onnxruntime.dll and resolve it from the plugin's own
+        # directory (see OrtDelayLoad.cpp): survives hosts that load VST3 dlls
+        # without LOAD_WITH_ALTERED_SEARCH_PATH (the bundle dir is then NOT in
+        # the DLL search path). Also lets the DSP engine run with no ORT dll
+        # present at all.
+        if (MSVC AND TARGET VoiceFem_VST3)
+            target_link_libraries(VoiceFem_VST3 PRIVATE delayimp)
+            target_link_options(VoiceFem_VST3 PRIVATE "/DELAYLOAD:onnxruntime.dll")
+        endif()
     else()
         add_library(ort SHARED IMPORTED GLOBAL)
         if (APPLE)
@@ -121,6 +147,16 @@ if (VFEM_NEURAL)
                 INSTALL_RPATH "@loader_path;${VFEM_ORT_DIR}/lib")
         else()
             set_target_properties(ort PROPERTIES IMPORTED_LOCATION "${VFEM_ORT_DIR}/lib/libonnxruntime.so")
+            # bundle the runtime next to the plugin .so and find it there
+            if (TARGET VoiceFem_VST3)
+                set_target_properties(VoiceFem_VST3 PROPERTIES
+                    BUILD_RPATH "$ORIGIN"
+                    INSTALL_RPATH "$ORIGIN")
+                add_custom_command(TARGET VoiceFem_VST3 POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${VFEM_ORT_DIR}/lib/libonnxruntime.so.1.20.1"
+                        "$<TARGET_FILE_DIR:VoiceFem_VST3>/")
+            endif()
         endif()
         target_link_libraries(VoiceFem PRIVATE ort dl)
     endif()

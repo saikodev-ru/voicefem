@@ -72,9 +72,16 @@ cmake --build build --config Release
 Результат: `build/VoiceFem_artefacts/Release/VST3/VoiceFem.vst3`
 
 ## Установка в FL Studio 26
-1. Скопируйте `VoiceFem.vst3` в `C:\Program Files\Common Files\VST3\`
-2. FL Studio → Options → Manage plugins → **Find installed plugins**
-3. Поставьте VoiceFem на вход микрофона в Mixer (Fast Track Input → слот эффекта).
+1. Скачайте артефакт `VoiceFem-VST3` из Actions (зелёный прогон) и распакуйте ZIP.
+2. Скопируйте **всю папку** `VoiceFem.vst3` (внутри должны быть `Contents\x86_64-win\VoiceFem.vst3`, `moduleinfo.json` и **`onnxruntime.dll`**) в `C:\Program Files\Common Files\VST3\`
+   - Если рядом с `Contents\x86_64-win\VoiceFem.vst3` нет `onnxruntime.dll` — Neural-режим не запустится, а в старых сборках плагин мог вообще не открыться.
+3. FL Studio → Options → Manage plugins → **Find installed plugins**
+4. Поставьте VoiceFem на вход микрофона в Mixer (Fast Track Input → слот эффекта).
+
+### Если FL пишет «There was a problem opening the plugin»
+- Убедитесь, что установлена папка `VoiceFem.vst3` целиком (не отдельные файлы) и `onnxruntime.dll` лежит в `Contents\x86_64-win\` рядом с самим плагином.
+- Свежие сборки грузят ORT через delay-load из папки плагина — если dll отсутствует, плагин всё равно откроется (Neural-режим просто будет недоступен, движок останется DSP).
+- Удалите старую копию из `C:\Program Files\Common Files\VST3\` перед заменой, затем пересканируйте плагин.
 
 ## Советы по настройке
 - Начните с «Feminine - Standard», затем крутите Formant: если голос звучит «маленьким/писклявым» — уменьшите; если «мужским в маске» — увеличьте.
