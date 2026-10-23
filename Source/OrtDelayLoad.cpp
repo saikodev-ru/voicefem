@@ -17,7 +17,7 @@
 
     Windows/MSVC only - compiles to an empty TU elsewhere.
 */
-#if defined (_WIN32) && defined (_MSC_VER) && defined (VFEM_NEURAL)
+#if defined (_WIN32) && defined (_MSC_VER) && defined (DYV_NEURAL)
 
  #ifndef WIN32_LEAN_AND_MEAN
   #define WIN32_LEAN_AND_MEAN
@@ -29,21 +29,14 @@
  #include <windows.h>
  #include <delayimp.h>
 
-static FARPROC WINAPI ortDelayLoadHook (unsigned dliNotify, PDelayLoadInfo pdli)
+// Loads onnxruntime.dll by absolute path from the directory of THIS plugin dll.
+// Safe to call repeatedly; returns false (never throws) if it cannot be loaded.
+static HMODULE loadOrtFromPluginDir()
 {
-    if (dliNotify != dliNotePreLoadLibrary || pdli == nullptr || pdli->szDll == nullptr)
-        return nullptr;
-
-    // we only handle the runtime itself; anything else goes through the
-    // default loader logic
-    if (lstrcmpiA (pdli->szDll, "onnxruntime.dll") != 0)
-        return nullptr;
-
-    // directory of THIS dll (the plugin), not of the host exe
     HMODULE self = nullptr;
     if (! GetModuleHandleExW (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
                                 | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                              reinterpret_cast<LPCWSTR> (&ortDelayLoadHook),
+                              reinterpret_cast<LPCWSTR> (&loadOrtFromPluginDir),
                               &self)
         || self == nullptr)
         return nullptr;
@@ -53,7 +46,6 @@ static FARPROC WINAPI ortDelayLoadHook (unsigned dliNotify, PDelayLoadInfo pdli)
     if (n == 0 || n >= (DWORD) (sizeof (path) / sizeof (path[0])))
         return nullptr;
 
-    // cut the file name off, leaving the directory (with the trailing slash)
     for (DWORD i = n; i > 0; --i)
         if (path[i - 1] == L'\\' || path[i - 1] == L'/')
         {
@@ -64,15 +56,23 @@ static FARPROC WINAPI ortDelayLoadHook (unsigned dliNotify, PDelayLoadInfo pdli)
     if (lstrcatW (path, L"onnxruntime.dll") == nullptr)
         return nullptr;
 
-    // LOAD_WITH_ALTERED_SEARCH_PATH: dependencies of ORT itself (if any) are
-    // searched relative to the ORT dll's directory
-    const HMODULE ort = LoadLibraryExW (path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    return LoadLibraryExW (path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+}
 
-    // returning a module here makes the delay-load helper use it instead of
-    // calling LoadLibrary itself; NULL -> default behaviour (standard error)
-    return reinterpret_cast<FARPROC> (ort);
+bool dyvLoadOrt()
+{
+    return loadOrtFromPluginDir() != nullptr;
+}
+
+static FARPROC WINAPI ortDelayLoadHook (unsigned dliNotify, PDelayLoadInfo pdli)
+{
+    if (dliNotify != dliNotePreLoadLibrary || pdli == nullptr || pdli->szDll == nullptr)
+        return nullptr;
+    if (lstrcmpiA (pdli->szDll, "onnxruntime.dll") != 0)
+        return nullptr;
+    return reinterpret_cast<FARPROC> (loadOrtFromPluginDir());
 }
 
 extern "C" const PfnDliHook __pfnDliNotifyHook2 = ortDelayLoadHook;
 
-#endif // _WIN32 && _MSC_VER && VFEM_NEURAL
+#endif // _WIN32 && _MSC_VER && DYV_NEURAL

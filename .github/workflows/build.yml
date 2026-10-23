@@ -44,10 +44,10 @@ jobs:
         run: |
           $neural = "ON"
           if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and "${{ inputs.neural }}" -eq "false") { $neural = "OFF" }
-          Write-Host "VFEM_NEURAL=$neural"
+          Write-Host "DYV_NEURAL=$neural"
           # pass the toggle through an initial-cache script: pwsh can mangle
           # bare -DVAR=VALUE tokens, -C <file> cannot be mis-parsed
-          "set(VFEM_NEURAL $neural CACHE BOOL ""neural engine toggle"" FORCE)" | Out-File -Encoding ascii init_cache.cmake
+          "set(DYV_NEURAL $neural CACHE BOOL ""neural engine toggle"" FORCE)" | Out-File -Encoding ascii init_cache.cmake
           Get-Content init_cache.cmake
           cmake -B build -S . -G "Visual Studio 18 2026" -A x64 -C init_cache.cmake
 
@@ -57,7 +57,7 @@ jobs:
       - name: Verify VST3 bundle
         shell: pwsh
         run: |
-          $bundle = "build/VoiceFem_artefacts/Release/VST3/VoiceFem.vst3"
+          $bundle = "build/DyVocalizer_artefacts/Release/VST3/DyVocalizer.vst3"
           if (!(Test-Path $bundle)) { Write-Error "VST3 bundle not found"; exit 1 }
           Get-ChildItem -Recurse $bundle | ForEach-Object { Write-Host "$($_.Length) bytes  $($_.FullName)" }
           $dspOnly = ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and "${{ inputs.neural }}" -eq "false")
@@ -73,6 +73,6 @@ jobs:
       - name: Upload VST3 plugin
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceFem-VST3${{ github.event_name == 'workflow_dispatch' && inputs.neural == false && '-DSPonly' || '' }}
-          path: build/VoiceFem_artefacts/Release/VST3/
+          name: DyVocalizer-VST3${{ github.event_name == 'workflow_dispatch' && inputs.neural == false && '-DSPonly' || '' }}
+          path: build/DyVocalizer_artefacts/Release/VST3/
           if-no-files-found: error

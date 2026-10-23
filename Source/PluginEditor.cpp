@@ -1,6 +1,6 @@
 #include "PluginEditor.h"
 
-VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p), proc (p)
+DyVocalizerEditor::DyVocalizerEditor (DyVocalizerProcessor& p) : AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&fl11);
 
@@ -72,15 +72,15 @@ VoiceFemEditor::VoiceFemEditor (VoiceFemProcessor& p) : AudioProcessorEditor (&p
     setSize (780, 560);
 }
 
-VoiceFemEditor::~VoiceFemEditor() { setLookAndFeel (nullptr); }
+DyVocalizerEditor::~DyVocalizerEditor() { setLookAndFeel (nullptr); }
 
-VoiceFemEditor::Knob* VoiceFemEditor::knobFor (const char* id)
+DyVocalizerEditor::Knob* DyVocalizerEditor::knobFor (const char* id)
 {
     for (auto& k : knobs) if (k->paramId == id) return k.get();
     return nullptr;
 }
 
-void VoiceFemEditor::addKnob (const char* id, const char* text, const char* hint)
+void DyVocalizerEditor::addKnob (const char* id, const char* text, const char* hint)
 {
     auto k = std::make_unique<Knob>();
     k->paramId = id; k->hint = hint;
@@ -102,7 +102,7 @@ void VoiceFemEditor::addKnob (const char* id, const char* text, const char* hint
     knobs.push_back (std::move (k));
 }
 
-void VoiceFemEditor::addChoice (const char* id, const char* text)
+void DyVocalizerEditor::addChoice (const char* id, const char* text)
 {
     auto c = std::make_unique<Choice>();
     c->label.setText (text, juce::dontSendNotification);
@@ -115,7 +115,7 @@ void VoiceFemEditor::addChoice (const char* id, const char* text)
     choices.push_back (std::move (c));
 }
 
-void VoiceFemEditor::updateEnabledStates()
+void DyVocalizerEditor::updateEnabledStates()
 {
     const bool neural = choices[0]->box.getSelectedItemIndex() == 1;
     const bool target = choices[1]->box.getSelectedItemIndex() == 1;
@@ -127,7 +127,7 @@ void VoiceFemEditor::updateEnabledStates()
     repaint();
 }
 
-void VoiceFemEditor::refreshVoiceList (const juce::StringArray& names)
+void DyVocalizerEditor::refreshVoiceList (const juce::StringArray& names)
 {
     voiceBox.clear (juce::dontSendNotification);
     if (names.isEmpty())
@@ -144,14 +144,14 @@ void VoiceFemEditor::refreshVoiceList (const juce::StringArray& names)
     updateEnabledStates();
 }
 
-void VoiceFemEditor::updateNeuralStatus (const juce::String& status)
+void DyVocalizerEditor::updateNeuralStatus (const juce::String& status)
 {
     const auto imp = proc.getImportStatus();
     const auto t = imp.isEmpty() ? status : imp + "   |   " + status;
     if (statusLabel.getText() != t) statusLabel.setText (t, juce::dontSendNotification);
 }
 
-bool VoiceFemEditor::isInterestedInFileDrag (const juce::StringArray& files)
+bool DyVocalizerEditor::isInterestedInFileDrag (const juce::StringArray& files)
 {
     for (auto& f : files)
     {
@@ -161,12 +161,12 @@ bool VoiceFemEditor::isInterestedInFileDrag (const juce::StringArray& files)
     return false;
 }
 
-void VoiceFemEditor::filesDropped (const juce::StringArray& files, int, int)
+void DyVocalizerEditor::filesDropped (const juce::StringArray& files, int, int)
 {
     for (auto& f : files) proc.importModel (juce::File (f));
 }
 
-void VoiceFemEditor::paint (juce::Graphics& g)
+void DyVocalizerEditor::paint (juce::Graphics& g)
 {
     using namespace juce;
     g.setGradientFill (ColourGradient (Fl11::bgTop(), 0, 0, Fl11::bgBottom(), 0, (float) getHeight(), false));
@@ -182,7 +182,7 @@ void VoiceFemEditor::paint (juce::Graphics& g)
 
     g.setColour (Fl11::orange());
     g.setFont (Fl11::font (20.0f, true));
-    g.drawText ("VoiceFem", 14, 0, 140, headerRect.getHeight(), Justification::centredLeft);
+    g.drawText ("DyVocalizer", 14, 0, 140, headerRect.getHeight(), Justification::centredLeft);
     g.setColour (Fl11::textDim());
     g.setFont (Fl11::font (11.0f));
     g.drawText ("realtime voice engine", 118, 4, 160, headerRect.getHeight(), Justification::centredLeft);
@@ -207,7 +207,7 @@ void VoiceFemEditor::paint (juce::Graphics& g)
     g.drawLine (0, (float) getHeight() - 28.0f, (float) getWidth(), (float) getHeight() - 28.0f);
 }
 
-void VoiceFemEditor::resized()
+void DyVocalizerEditor::resized()
 {
     auto area = getLocalBounds();
     headerRect = area.removeFromTop (40);

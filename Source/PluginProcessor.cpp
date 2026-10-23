@@ -33,7 +33,7 @@ constexpr int kNumPresets = (int) (sizeof (kPresets) / sizeof (kPresets[0]));
 
 using APVTS = juce::AudioProcessorValueTreeState;
 
-APVTS::ParameterLayout VoiceFemProcessor::createLayout()
+APVTS::ParameterLayout DyVocalizerProcessor::createLayout()
 {
     using F = juce::AudioParameterFloat;
     using C = juce::AudioParameterChoice;
@@ -62,18 +62,20 @@ APVTS::ParameterLayout VoiceFemProcessor::createLayout()
     return { p.begin(), p.end() };
 }
 
-float VoiceFemProcessor::rangeHz (int choice)
+float DyVocalizerProcessor::rangeHz (int choice)
 {
     return choice == 0 ? 65.f : (choice == 2 ? 100.f : 80.f);
 }
 
-juce::File VoiceFemProcessor::modelsDir()
+juce::File DyVocalizerProcessor::modelsDir()
 {
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-        .getChildFile ("VoiceFem").getChildFile ("models");
+    const auto appData = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
+    const auto dir = appData.getChildFile ("DyVocalizer").getChildFile ("models");
+    const auto legacy = appData.getChildFile ("VoiceFem").getChildFile ("models"); // pre-rename location
+    return (! dir.isDirectory() && legacy.isDirectory()) ? legacy : dir;
 }
 
-juce::String VoiceFemProcessor::neuralStatus() const
+juce::String DyVocalizerProcessor::neuralStatus() const
 {
     switch (neuralState.load())
     {
@@ -84,7 +86,7 @@ juce::String VoiceFemProcessor::neuralStatus() const
     }
 }
 
-VoiceFemProcessor::VoiceFemProcessor()
+DyVocalizerProcessor::DyVocalizerProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
@@ -93,21 +95,21 @@ VoiceFemProcessor::VoiceFemProcessor()
     startTimerHz (4); // model loading / status refresh (message thread)
 }
 
-VoiceFemProcessor::~VoiceFemProcessor()
+DyVocalizerProcessor::~DyVocalizerProcessor()
 {
     shuttingDown = true;
     importPool.removeAllJobs (true, 15000);
 }
 
-juce::String VoiceFemProcessor::getImportStatus() const
+juce::String DyVocalizerProcessor::getImportStatus() const
 {
     const juce::ScopedLock sl (importLock);
     return importStatus;
 }
 
-void VoiceFemProcessor::rescanModels() { rescanRequested = true; }
+void DyVocalizerProcessor::rescanModels() { rescanRequested = true; }
 
-void VoiceFemProcessor::importModel (const juce::File& file)
+void DyVocalizerProcessor::importModel (const juce::File& file)
 {
     auto setStatus = [this] (const juce::String& t) { const juce::ScopedLock sl (importLock); importStatus = t; };
     const auto ext = file.getFileExtension().toLowerCase();
@@ -163,20 +165,20 @@ void VoiceFemProcessor::importModel (const juce::File& file)
     });
 }
 
-bool VoiceFemProcessor::isBusesLayoutSupported (const BusesLayout& l) const
+bool DyVocalizerProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 {
     const auto in = l.getMainInputChannelSet(), out = l.getMainOutputChannelSet();
     if (in != out) return false;
     return in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo();
 }
 
-void VoiceFemProcessor::applyLatency()
+void DyVocalizerProcessor::applyLatency()
 {
     const bool neuralActive = currentEngine == 1 && neuralState.load() == 1;
     setLatencySamples (neuralActive ? neural.getLatency() : engine.getLatency());
 }
 
-void VoiceFemProcessor::prepareToPlay (double sampleRate, int)
+void DyVocalizerProcessor::prepareToPlay (double sampleRate, int)
 {
     currentSampleRate = sampleRate;
     currentRange = (int) apvts.getRawParameterValue ("range")->load();
@@ -185,9 +187,9 @@ void VoiceFemProcessor::prepareToPlay (double sampleRate, int)
     applyLatency();
 }
 
-void VoiceFemProcessor::timerCallback()
+void DyVocalizerProcessor::timerCallback()
 {
-#if VFEM_NEURAL
+#if DYV_NEURAL
     if (rescanRequested.exchange (false))
     {
         voiceNames.clear(); voicePaths.clear(); loadedVoice = -1; neuralState = 0;
@@ -207,7 +209,7 @@ void VoiceFemProcessor::timerCallback()
             for (auto& v : list) { voiceNames.add (juce::String (v.name)); voicePaths.push_back (v.path); }
             // voice param range stays 0..31; out-of-range values are clamped on use
             if (juce::AudioProcessorEditor* ed = getActiveEditor())
-                if (auto* e = dynamic_cast<VoiceFemEditor*> (ed))
+                if (auto* e = dynamic_cast<DyVocalizerEditor*> (ed))
                     e->refreshVoiceList (voiceNames);
         }
     }
@@ -244,12 +246,12 @@ void VoiceFemProcessor::timerCallback()
     }
 
     if (auto* ed = getActiveEditor())
-        if (auto* e = dynamic_cast<VoiceFemEditor*> (ed))
+        if (auto* e = dynamic_cast<DyVocalizerEditor*> (ed))
             e->updateNeuralStatus (neuralStatus());
 #endif
 }
 
-void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void DyVocalizerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
     const int numIn = getTotalNumInputChannels();
@@ -274,7 +276,7 @@ void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         applyLatency();
     }
 
-    vfem::Params P;
+    dyv::Params P;
     P.pitchSemis = get ("pitch");
     P.formantSemis = get ("formant");
     P.targetMode = (int) get ("mode") == 1;
@@ -310,7 +312,7 @@ void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (useNeuralPath)
         {
             const float n = neural.process (x);
-            y = wet * vfem::softClip (n * outGain) + (1.f - wet) * x;
+            y = wet * dyv::softClip (n * outGain) + (1.f - wet) * x;
         }
         else
         {
@@ -321,13 +323,13 @@ void VoiceFemProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 }
 
-int VoiceFemProcessor::getNumPrograms() { return kNumPresets; }
-const juce::String VoiceFemProcessor::getProgramName (int i)
+int DyVocalizerProcessor::getNumPrograms() { return kNumPresets; }
+const juce::String DyVocalizerProcessor::getProgramName (int i)
 {
     return (i >= 0 && i < kNumPresets) ? kPresets[i].name : juce::String();
 }
 
-void VoiceFemProcessor::setCurrentProgram (int index)
+void DyVocalizerProcessor::setCurrentProgram (int index)
 {
     if (index < 0 || index >= kNumPresets) return;
     currentProgram = index;
@@ -353,18 +355,18 @@ void VoiceFemProcessor::setCurrentProgram (int index)
     set ("voicing", s.voicing);
 }
 
-void VoiceFemProcessor::getStateInformation (juce::MemoryBlock& dest)
+void DyVocalizerProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
     if (auto xml = apvts.copyState().createXml()) copyXmlToBinary (*xml, dest);
 }
 
-void VoiceFemProcessor::setStateInformation (const void* data, int size)
+void DyVocalizerProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
-juce::AudioProcessorEditor* VoiceFemProcessor::createEditor() { return new VoiceFemEditor (*this); }
+juce::AudioProcessorEditor* DyVocalizerProcessor::createEditor() { return new DyVocalizerEditor (*this); }
 
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new VoiceFemProcessor(); }
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new DyVocalizerProcessor(); }
