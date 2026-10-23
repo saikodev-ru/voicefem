@@ -55,6 +55,29 @@ def main() -> int:
                             "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI",
                             args.rvc_dir], check=False)
         if not (Path(args.rvc_dir) / "infer").is_dir():
+            # no git (or clone failed): download the repo as a zip, no git needed
+            try:
+                import io, zipfile, urllib.request
+                print("Downloading RVC code zip (one time)...")
+                url = "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI/archive/refs/heads/main.zip"
+                data = urllib.request.urlopen(url, timeout=120).read()
+                dest = Path(args.rvc_dir)
+                shutil.rmtree(dest, ignore_errors=True)
+                dest.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    for m in z.infolist():
+                        rel = m.filename.split("/", 1)[1] if "/" in m.filename else ""
+                        if not rel:
+                            continue
+                        target = dest / rel
+                        if m.is_dir():
+                            target.mkdir(parents=True, exist_ok=True)
+                        else:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_bytes(z.read(m))
+            except Exception as e:
+                print("RVC zip download failed:", e)
+        if not (Path(args.rvc_dir) / "infer").is_dir():
             print("ERROR: RVC code folder not found. Install git or clone "
                   "RVC-Project/Retrieval-based-Voice-Conversion-WebUI into: " + args.rvc_dir)
             return 2
