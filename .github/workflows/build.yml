@@ -45,7 +45,11 @@ jobs:
           $neural = "ON"
           if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and "${{ inputs.neural }}" -eq "false") { $neural = "OFF" }
           Write-Host "VFEM_NEURAL=$neural"
-          cmake -B build -S . -G "Visual Studio 18 2026" -A x64 -DVFEM_NEURAL=$neural
+          # pass the toggle through an initial-cache script: pwsh can mangle
+          # bare -DVAR=VALUE tokens, -C <file> cannot be mis-parsed
+          "set(VFEM_NEURAL $neural CACHE BOOL ""neural engine toggle"" FORCE)" | Out-File -Encoding ascii init_cache.cmake
+          Get-Content init_cache.cmake
+          cmake -B build -S . -G "Visual Studio 18 2026" -A x64 -C init_cache.cmake
 
       - name: Build
         run: cmake --build build --config Release --parallel

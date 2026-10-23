@@ -18,6 +18,7 @@ FetchContent_MakeAvailable(JUCE)
 # Set VFEM_NEURAL=OFF to build the DSP-only plugin.
 # Set VFEM_ORT_DIR=/path/to/prebuilt-onnxruntime to skip the download.
 option(VFEM_NEURAL "Build with the ONNX neural voice engine" ON)
+message(STATUS "VoiceFem: VFEM_NEURAL=${VFEM_NEURAL}")
 set(VFEM_ORT_VERSION "1.20.1")
 set(VFEM_ORT_DIR "" CACHE PATH "Prebuilt onnxruntime dir (must contain include/ and lib/)")
 
