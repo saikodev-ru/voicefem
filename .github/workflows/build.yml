@@ -9,12 +9,30 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Download project
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Check Visual Studio
         shell: pwsh
         run: |
-          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -property installationPath
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          if (!(Test-Path $vswhere)) {
+            Write-Error "Visual Studio Installer not found"
+            exit 1
+          }
+
+          $vsPath = & $vswhere -latest -products '*' -property installationPath
+
+          if (!$vsPath) {
+            Write-Error "Visual Studio installation not found"
+            exit 1
+          }
+
+          Write-Host "Visual Studio found: $vsPath"
+          cmake --version
 
       - name: Configure
         run: cmake -B build -S . -G "Visual Studio 17 2022" -A x64
@@ -22,8 +40,9 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Upload plugin
+      - name: Upload VST3 plugin
         uses: actions/upload-artifact@v4
         with:
           name: VoiceFem-VST3
           path: build/VoiceFem_artefacts/Release/VST3/
+          if-no-files-found: error
