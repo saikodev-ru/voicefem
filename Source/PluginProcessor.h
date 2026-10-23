@@ -1,14 +1,14 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
-#include "VoiceFemEngine.h"
+#include "DyVocalizerEngine.h"
 #include "NeuralVC.h"
 
-class VoiceFemProcessor : public juce::AudioProcessor,
+class DyVocalizerProcessor : public juce::AudioProcessor,
                           private juce::Timer
 {
 public:
-    VoiceFemProcessor();
-    ~VoiceFemProcessor() override = default;
+    DyVocalizerProcessor();
+    ~DyVocalizerProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -18,7 +18,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "VoiceFem"; }
+    const juce::String getName() const override { return "DyVocalizer"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
@@ -38,7 +38,7 @@ public:
     static constexpr const char* kVersionString = "0.3.2";
     static bool neuralBuilt()
     {
-#if VFEM_NEURAL
+#if DYV_NEURAL
         return true;
 #else
         return false;
@@ -48,6 +48,11 @@ public:
     juce::String neuralStatus() const;
     static juce::File modelsDir();
 
+    // model import: .onnx is copied as-is, .pth is converted via the bundled python tool
+    void importModel (const juce::File& file);
+    juce::String getImportStatus() const;
+    void rescanModels();
+
     void timerCallback();
 
 private:
@@ -55,7 +60,7 @@ private:
     static float rangeHz (int choice);
     void applyLatency();
 
-    vfem::Engine engine;
+    dyv::Engine engine;
     nvf::NeuralEngine neural;
 
     double currentSampleRate = 48000.0;
@@ -74,5 +79,11 @@ private:
     juce::uint32 lastScanAttempt = 0, lastContentAttempt = 0, lastVoiceAttempt = 0;
     juce::String statusNote;              // human-readable reason for the current state
 
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceFemProcessor)
+    mutable juce::CriticalSection importLock;
+    juce::String importStatus;
+    std::atomic<bool> shuttingDown { false };
+    std::atomic<bool> rescanRequested { false };
+    juce::ThreadPool importPool { 1 };
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DyVocalizerProcessor)
 };

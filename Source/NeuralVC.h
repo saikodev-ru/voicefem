@@ -25,8 +25,17 @@
 //   Consumed per step: chunk frames. Emitted: (chunk+1) frames of audio; the
 //   first emitted frame crossfades with the tail of the previous emission.
 #pragma once
-#if VFEM_NEURAL
+#if DYV_NEURAL
+// Do NOT let the ORT C++ header initialise its API table in a static
+// initialiser: that runs inside DllMain (loader lock) when the host loads the
+// plugin, and if onnxruntime.dll is missing / wrong version the plugin dll
+// fails to load at all ("problem opening the plugin ... unknown reason").
+// We call Ort::InitApi() lazily, only when the neural engine is first used.
+#define ORT_API_MANUAL_INIT
 #include <onnxruntime_cxx_api.h>
+ #if defined (_WIN32) && defined (_MSC_VER)
+bool dyvLoadOrt(); // OrtDelayLoad.cpp: LoadLibrary onnxruntime.dll from the plugin's own folder
+ #endif
 #endif
 
 #include <algorithm>
@@ -152,7 +161,7 @@ inline int coarseOf (float f0)
     return std::min (255, std::max (1, c));
 }
 
-#if VFEM_NEURAL
+#if DYV_NEURAL
 
 // ------------------------------------------------------------- ONNX model
 struct ModelIO
@@ -218,16 +227,33 @@ static void fillModelIO (Ort::Session& s, ModelIO& io)
     }
 }
 
+// One-time, lazy, failure-tolerant ORT bring-up (never throws).
+static bool ensureOrtApi()
+{
+    static const bool ok = []() -> bool
+    {
+       #if defined (_WIN32) && defined (_MSC_VER)
+        if (! dyvLoadOrt()) return false;
+       #endif
+        const OrtApiBase* base = OrtGetApiBase();
+        if (base == nullptr || base->GetApi (ORT_API_VERSION) == nullptr) return false; // runtime older than headers
+        Ort::InitApi();
+        return true;
+    }();
+    return ok;
+}
+
 static std::unique_ptr<SessionHolder> openSession (const std::string& path, int threads,
                                                    std::string* err = nullptr)
 {
+    if (! ensureOrtApi()) { if (err) *err = "onnxruntime.dll is missing or incompatible"; return nullptr; }
     if (! readFileOk (path))
     {
         if (err) *err = "file missing or unreadable";
         return nullptr;
     }
     auto h = std::make_unique<SessionHolder>();
-    h->env = std::make_unique<Ort::Env> (ORT_LOGGING_LEVEL_WARNING, "voicefem-nn");
+    h->env = std::make_unique<Ort::Env> (ORT_LOGGING_LEVEL_WARNING, "dyvocalizer-nn");
     Ort::SessionOptions so;
     so.SetGraphOptimizationLevel (GraphOptimizationLevel::ORT_ENABLE_ALL);
     so.SetExecutionMode (ORT_SEQUENTIAL);
@@ -475,7 +501,7 @@ public:
         semi = pitchSemis; tMode = targetMode; tHz = targetHz; into = intonation;
     }
 
-    // sample-by-sample, mirrors vfem::Engine::process
+    // sample-by-sample, mirrors dyv::Engine::process
     float process (float x)
     {
         if (! voiceReady()) return 0.f;
@@ -799,7 +825,7 @@ private:
     std::vector<float> featBuf;
 };
 
-#else // !VFEM_NEURAL
+#else // !DYV_NEURAL
 
 // stub so the plugin still compiles without ONNX Runtime
 class NeuralEngine
@@ -824,5 +850,5 @@ public:
     float process (float x) { return x; }
 };
 
-#endif // VFEM_NEURAL
+#endif // DYV_NEURAL
 } // namespace nvf

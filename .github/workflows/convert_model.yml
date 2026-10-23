@@ -1,0 +1,56 @@
+name: Convert RVC model (.pth -> ONNX)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pth_url:
+        description: 'Direct URL of the .pth checkpoint (or Yandex public link)'
+        required: true
+      name:
+        description: 'Voice name (result: voice_<name>.onnx)'
+        required: false
+        default: 'imported'
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install onnx onnxruntime numpy
+
+      - name: Resolve Yandex public link (if needed)
+        id: url
+        run: |
+          URL="${{ inputs.pth_url }}"
+          if echo "$URL" | grep -q "yadi.sk\|disk.yandex"; then
+            ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$URL")
+            HREF=$(curl -s "https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key=$ENC" | python3 -c "import json,sys; print(json.load(sys.stdin)['href'])")
+            URL="$HREF"
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Download checkpoint
+        run: |
+          curl -L --fail --retry 3 --retry-delay 5 -o model.pth "${{ steps.url.outputs.url }}"
+          ls -la model.pth
+
+      - name: Convert
+        run: |
+          python tools/pth_to_onnx.py model.pth --out outdir --test
+          mv "outdir/voice_model.onnx" "outdir/voice_${{ inputs.name }}.onnx" 2>/dev/null || true
+          ls -la outdir/
+
+      - name: Upload ONNX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-${{ inputs.name }}
+          path: outdir/*.onnx
+          if-no-files-found: error

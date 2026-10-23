@@ -1,4 +1,4 @@
-// VoiceFemEngine.h
+// DyVocalizerEngine.h
 // Real-time pitch + formant voice processor (no JUCE dependency).
 //
 // Approach: pitch-synchronous overlap-add (PSOLA).
@@ -22,7 +22,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace vfem
+namespace dyv
 {
 constexpr double kPi = 3.14159265358979323846;
 
@@ -549,4 +549,4 @@ private:
     DCBlock dcIn, dcOut;
     uint32_t rng = 1;
 };
-} // namespace vfem
+} // namespace dyv

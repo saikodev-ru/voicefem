@@ -1,8 +1,8 @@
-# VoiceFem — реалтайм-плагин «феминизации» голоса (VST3, Windows)
+# DyVocalizer — реалтайм-плагин «феминизации» голоса (VST3, Windows)
 
 ## Как это работает (и почему не «чипмунк»)
 Обычный pitch-shift сдвигает всё спектр целиком: тембр (форманты) уезжает вместе с высотой, голос звучит «мультяшно».
-VoiceFem использует PSOLA — высота и форманты управляются **независимо**:
+DyVocalizer использует PSOLA — высота и форманты управляются **независимо**:
 - **Pitch** — меняет высоту тона, не трогая тембр.
 - **Formant** — отдельно сдвигает форманты (размер «резонатора»), это главное для женского тембра.
 - **Согласные и шипящие** (с, ш, ф, дыхание) не обрабатываются грейнами, а проходят напрямую → нет «каши» и металла.
@@ -43,7 +43,7 @@ VoiceFem использует PSOLA — высота и форманты упр�
 Помимо DSP/PSOLA-движка плагин содержит **нейросетевую конвертацию голоса** (как в Supertone Shift): контент-энкодер (класс ContentVec) → конверсия F0 → RVC-генератор. Голос пересинтезируется тембром выбранной модели — полная смена тембра, а не сдвиг формант. Латентность ~60 мс (стриминговые чанки 40 мс + перекрёстный кроссфейд 20 мс).
 
 ### Установка моделей
-Модели кладутся в `%APPDATA%\VoiceFem\models` (кнопка **Models...** в интерфейсе открывает эту папку). Нужны два типа файлов:
+Модели кладутся в `%APPDATA%\DyVocalizer\models` (кнопка **Models...** в интерфейсе открывает эту папку). Нужны два типа файлов:
 
 - `content.onnx` — контент-энкодер ContentVec-768 (общий для всех голосов);
 - `voice_<имя>.onnx` — один или несколько RVC-генераторов.
@@ -52,20 +52,22 @@ VoiceFem использует PSOLA — высота и форманты упр�
 ```
 powershell -ExecutionPolicy Bypass -File tools\install_models.ps1
 ```
-Скачает ContentVec-энкодер и два готовых женских голоса (~870 МБ, HuggingFace).
+Скачает ContentVec-энкодер, базовый голос HuTao (зашит как стандартная библиотека) и готовые женские голоса (HuggingFace).
 
-**Способ 2 — артефакт CI:** Actions → прогон → артефакт `VoiceFem-models` → распаковать в `%APPDATA%\VoiceFem\models`.
+**Способ 2 — Release:** в GitHub Releases лежит `DyVocalizer-models.zip` (content.onnx + базовый голос HuTao) — распаковать в `%APPDATA%\DyVocalizer\models`.
 
-**Способ 3 — свои голоса из RVC-чекпойнтов (.pth):**
+**Способ 3 — артефакт CI:** Actions → прогон → артефакт `DyVocalizer-models` → распаковать в `%APPDATA%\DyVocalizer\models`.
+
+**Способ 4 — свои голоса из RVC-чекпойнтов (.pth):**
 ```
 pip install torch onnx onnxruntime scipy
 # Windows/CPU torch:  pip install torch --index-url https://download.pytorch.org/whl/cpu
 python tools\pth_to_onnx.py Модель.pth voice_имя.onnx
-copy voice_имя.onnx "%APPDATA%\VoiceFem\models\"
+copy voice_имя.onnx "%APPDATA%\DyVocalizer\models\"
 ```
 Поддерживаются RVC v1 (256) и v2 (768), с F0 и без. Конвертер повторяет официальный экспорт RVC (`SynthesizerTrnMsNSFsidM`) и автоматически выбирает нужный режим кадров. Также подходят готовые ONNX-экспорты в конвенции w-okada / VC Client (phone/phone_lengths/pitch/pitchf/ds[/rnd]).
 
-Проверка совместимости: `python tools/validate_model.py "%APPDATA%\VoiceFem\models"`
+Проверка совместимости: `python tools/validate_model.py "%APPDATA%\DyVocalizer\models"`
 
 В плагине: Engine = **Neural (model)**, выберите голос в списке Neural Voice. Пока модели не найдены/грузятся, звучит DSP-движок, а строка статуса показывает, что происходит:
 - `no models in <путь>` — папка пуста (путь указан точно; файлы можно докладывать на ходу, движок подхватит через ~2 с);
@@ -78,30 +80,30 @@ copy voice_имя.onnx "%APPDATA%\VoiceFem\models\"
 - В режиме Neural параметры Pitch/Target/Intonation работают (управляют F0), Breath/Body/Air/De-Ess действуют как пост-обработка; Formant не используется (тембр задаёт модель).
 - Первый переключение в Neural грузит модели (секунды) — в этот момент звучит DSP-движок.
 - Если моделей нет или они несовместимы — плагин остаётся на DSP-движке и пишет статус в интерфейсе.
-- Отключить нейро-часть при сборке: `cmake -B build -DVFEM_NEURAL=OFF`.
+- Отключить нейро-часть при сборке: `cmake -B build -DDYV_NEURAL=OFF`.
 
 ## Сборка
 ### Вариант А — GitHub (без установки компилятора)
 1. Создайте репозиторий, загрузите в него всё содержимое этой папки (включая `.github`).
 2. Вкладка **Actions → Build VST3 (Windows) → Run workflow**.
-3. Скачайте артефакт `VoiceFem-VST3`.
+3. Скачайте артефакт `DyVocalizer-VST3`.
 
 ### Вариант Б — локально (Visual Studio 2022 + CMake)
 ```
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
-Результат: `build/VoiceFem_artefacts/Release/VST3/VoiceFem.vst3`
+Результат: `build/DyVocalizer_artefacts/Release/VST3/DyVocalizer.vst3`
 
 ## Установка в FL Studio 26
-1. Скачайте артефакт `VoiceFem-VST3` из Actions (зелёный прогон) и распакуйте ZIP.
-2. Скопируйте **всю папку** `VoiceFem.vst3` (внутри должны быть `Contents\x86_64-win\VoiceFem.vst3`, `moduleinfo.json` и **`onnxruntime.dll`**) в `C:\Program Files\Common Files\VST3\`
-   - Если рядом с `Contents\x86_64-win\VoiceFem.vst3` нет `onnxruntime.dll` — Neural-режим не запустится, а в старых сборках плагин мог вообще не открыться.
+1. Скачайте артефакт `DyVocalizer-VST3` из Actions (зелёный прогон) и распакуйте ZIP.
+2. Скопируйте **всю папку** `DyVocalizer.vst3` (внутри должны быть `Contents\x86_64-win\DyVocalizer.vst3`, `moduleinfo.json` и **`onnxruntime.dll`**) в `C:\Program Files\Common Files\VST3\`
+   - Если рядом с `Contents\x86_64-win\DyVocalizer.vst3` нет `onnxruntime.dll` — Neural-режим не запустится, а в старых сборках плагин мог вообще не открыться.
 3. FL Studio → Options → Manage plugins → **Find installed plugins**
-4. Поставьте VoiceFem на вход микрофона в Mixer (Fast Track Input → слот эффекта).
+4. Поставьте DyVocalizer на вход микрофона в Mixer (Fast Track Input → слот эффекта).
 
 ### Если FL пишет «There was a problem opening the plugin»
-- Убедитесь, что установлена папка `VoiceFem.vst3` целиком (не отдельные файлы) и `onnxruntime.dll` лежит в `Contents\x86_64-win\` рядом с самим плагином.
+- Убедитесь, что установлена папка `DyVocalizer.vst3` целиком (не отдельные файлы) и `onnxruntime.dll` лежит в `Contents\x86_64-win\` рядом с самим плагином.
 - Свежие сборки грузят ORT через delay-load из папки плагина — если dll отсутствует, плагин всё равно откроется (Neural-режим просто будет недоступен, движок останется DSP).
 - Удалите старую копию из `C:\Program Files\Common Files\VST3\` перед заменой, затем пересканируйте плагин.
 

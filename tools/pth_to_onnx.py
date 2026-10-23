@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Convert RVC voice checkpoints (.pth) to VoiceFem-compatible ONNX models.
+"""Convert RVC voice checkpoints (.pth) to DyVocalizer-compatible ONNX models.
 
 Usage:
     python tools/pth_to_onnx.py <model.pth> <out.onnx> [--test]
+    python tools/pth_to_onnx.py <model.pth> --out <models_dir>   (writes voice_<name>.onnx)
 
 Supports RVC v1 (256-dim features) and v2 (768-dim) checkpoints, with or
 without F0. The exported ONNX follows the official RVC export recipe
 (tools/export_onnx.py, SynthesizerTrnMsNSFsidM) using the realtime-VC
-convention that VoiceFem's neural engine consumes:
+convention that the neural engine consumes:
 
     phone          float32 [1, T, 256|768]
     phone_lengths  int64   [1]
@@ -19,13 +20,13 @@ convention that VoiceFem's neural engine consumes:
 
 Frame semantics (RVC v1/v2 generators): phone/pitch/pitchf are consumed at
 100 frames/s - i.e. the 50 fps ContentVec features and F0 must be duplicated
-(x2, nearest) before feeding. VoiceFem's engine detects this automatically
+(x2, nearest) before feeding. The engine detects this automatically
 via the model probe and handles the upsampling.
 
 Install:  pip install torch onnx onnxruntime scipy
           (Windows CPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu)
 
-After converting, copy the .onnx into %APPDATA%\\VoiceFem\\models
+After converting, copy the .onnx into %APPDATA%\\DyVocalizer\\models
 (next to content.onnx) and restart / rescan in the plugin.
 """
 import argparse
@@ -128,7 +129,7 @@ def export_f0(cpt, version, config, model_sr, out_path, opset):
 
     # RVC generators consume 100 fps inputs when modelSr / samplesPerFrame == 100
     # (v2 40k/48k models emit modelSr/100 samples per 50 fps ContentVec frame).
-    # VoiceFem feeds T=6 frames (2x3) in that mode, T=3 otherwise - trace exactly
+    # the engine feeds T=6 frames (2x3) in that mode, T=3 otherwise - trace exactly
     # that shape, because the traced attention pads are T-locked.
     ups = config[12] if len(config) > 12 and isinstance(config[12], (list, tuple)) else [400]
     spf = float(np.prod(ups))
@@ -202,10 +203,24 @@ def export_nonf0(cpt, version, out_path, opset):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("pth", help="RVC .pth checkpoint")
-    ap.add_argument("onnx", help="output .onnx path")
+    ap.add_argument("onnx", nargs="?", default=None, help="output .onnx path (optional when --out is given)")
+    ap.add_argument("--out", default=None,
+                    help="output path; if a directory, writes voice_<name>.onnx into it (plugin import uses this)")
     ap.add_argument("--opset", type=int, default=16, help="16 = official RVC recipe")
     ap.add_argument("--test", action="store_true", help="verify torch vs onnx output")
     args = ap.parse_args()
+
+    out_path = args.onnx
+    if args.out:
+        op = os.path.abspath(args.out)
+        if not op.lower().endswith(".onnx"):
+            os.makedirs(op, exist_ok=True)
+            stem = os.path.splitext(os.path.basename(args.pth))[0]
+            out_path = os.path.join(op, f"voice_{stem}.onnx")
+        else:
+            out_path = op
+    if not out_path:
+        ap.error("provide an output path or --out")
 
     cpt = load_checkpoint(args.pth)
     version = str(cpt.get("version", "v1"))
@@ -216,27 +231,27 @@ def main():
     print(f"checkpoint: version={version} f0={f0} sr={model_sr}")
 
     if f0:
-        inames, iargs, feat_dim, inter_ch = export_f0(cpt, version, config, model_sr, args.onnx, args.opset)
+        inames, iargs, feat_dim, inter_ch = export_f0(cpt, version, config, model_sr, out_path, args.opset)
     else:
-        inames, iargs, feat_dim, inter_ch = export_nonf0(cpt, version, args.onnx, args.opset)
-    print("exported:", args.onnx, f"({os.path.getsize(args.onnx) / 1e6:.1f} MB)")
+        inames, iargs, feat_dim, inter_ch = export_nonf0(cpt, version, out_path, args.opset)
+    print("exported:", out_path, f"({os.path.getsize(out_path) / 1e6:.1f} MB)")
 
     try:
         import onnx
-        m = onnx.load(args.onnx)
+        m = onnx.load(out_path)
         for k, v in (("vfem_sr", str(model_sr)), ("vfem_f0", "1" if f0 else "0"),
                      ("vfem_fps", str(100 if (len(config) > 12 and model_sr > 0 and
                         int(round(model_sr / float(np.prod(config[12] if isinstance(config[12], (list, tuple)) else [400])))) == 100) else 50)),
                      ("vfem_version", version), ("vfem_source", os.path.basename(args.pth))):
             e = m.metadata_props.add(); e.key, e.value = k, v
-        onnx.save(m, args.onnx)
+        onnx.save(m, out_path)
     except Exception as e:
         print("metadata:", e)
 
     if args.test:
         import onnxruntime as ort
         feeds = {n: t.detach().numpy() for n, t in zip(inames, iargs)}
-        ref = ort.InferenceSession(args.onnx, providers=["CPUExecutionProvider"])
+        ref = ort.InferenceSession(out_path, providers=["CPUExecutionProvider"])
         # official recipe check at the streaming frame count
         T0 = iargs[0].shape[1]
         for T in sorted({T0, 3 if T0 != 3 else 6}):
